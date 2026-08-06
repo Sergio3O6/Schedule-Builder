@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+
+# Crawler cache: regenerable from classes.ku.edu, and large. The normalized
+# bundles under data/bundles/ ARE committed — CI cannot regenerate them without
+# hitting KU's servers, and a static deploy has no build-time fetch step.
+data/raw/
+
+*.local
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
