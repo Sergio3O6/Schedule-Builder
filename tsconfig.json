@@ -5,7 +5,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    // "node" is here so scripts/ typechecks. The normalizer is written in TS
+    // specifically so it can import src/domain and have a schema change break the
+    // build; that only holds if tsc actually reads it (see "include" below).
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom"],
 
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -21,5 +24,8 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "vite.config.ts", "vitest.setup.ts"]
+  // "scripts" covers the crawler and normalizer. It has no files yet — tsc ignores
+  // a non-matching entry as long as some other entry matches — but it must be here
+  // before commit 2 writes into it, or the Node code lands untypechecked.
+  "include": ["src", "scripts", "vite.config.ts", "vitest.setup.ts"]
 }

@@ -23,4 +23,13 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-imports': 'error',
     },
   },
+  {
+    // The crawler and normalizer are Node programs. Without this they inherit only
+    // browser globals from the block above, so process/Buffer/__dirname read as
+    // undefined identifiers.
+    files: ['scripts/**/*.ts'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
 )
