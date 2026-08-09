@@ -35,6 +35,23 @@ const ZIP64_U16 = 0xffff
 const ZIP64_U32 = 0xffffffff
 
 /**
+ * Cheap check that bytes are plausibly a zip, and therefore plausibly an xlsx.
+ *
+ * Exists so callers can reject a wrong response *before* storing it. KU answers
+ * a search with no results using HTTP 200 and an HTML page, so status codes
+ * alone cannot tell an export from an error.
+ */
+export function looksLikeZip(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 && // P
+    bytes[1] === 0x4b && // K
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04
+  )
+}
+
+/**
  * Extracts the zip members by name.
  *
  * Reads the central directory rather than walking local headers: local headers

@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { RawCache } from './cache.ts'
 import { FetchSession } from './session.ts'
 import type { FetchLike, ResponseLike } from './session.ts'
-import { fetchExport } from './fetcher.ts'
+import { fetchExport, UnexpectedResponseError } from './fetcher.ts'
+
+/** The real page KU served for WOLO, a subject with no Fall 2026 classes. */
+const NO_CLASSES_PAGE = resolve(process.cwd(), 'tests/fixtures/no-classes-page.html')
+
+/** A minimal but genuine zip header, so the guard sees a plausible export. */
+const zipBytes = (payload = 'rest of the archive') =>
+  new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new TextEncoder().encode(payload)])
 
 let root: string
 
@@ -23,14 +30,14 @@ const clock = () => {
 }
 
 /** Counts outbound requests. The count is the point of most of these tests. */
-function countingFetch(status = 200, body = 'PKpayload') {
+function countingFetch(status = 200, body: Uint8Array = zipBytes()) {
   const urls: string[] = []
   const fetch: FetchLike = async (url) => {
     urls.push(url)
     const response: ResponseLike = {
       status,
       headers: { get: () => null },
-      arrayBuffer: async () => new TextEncoder().encode(body).buffer as ArrayBuffer,
+      arrayBuffer: async () => body.slice().buffer,
     }
     return response
   }
@@ -138,6 +145,84 @@ describe('resume', () => {
     await fetchExport(session, cache, { term: '4269', subject: 'EECS' })
 
     expect(urls).toHaveLength(2)
+  })
+})
+
+describe('responses that are not exports', () => {
+  it('recognizes KU real "no classes" page and never caches it', async () => {
+    // KU answers an empty search with HTTP 200 and HTML, so the status code
+    // alone cannot distinguish this from a successful export.
+    const page = new Uint8Array(await readFile(NO_CLASSES_PAGE))
+    const c = clock()
+    const { fetch } = countingFetch(200, page)
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'WOLO' }
+
+    await expect(
+      fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), cache, key),
+    ).rejects.toThrow(UnexpectedResponseError)
+
+    expect(await cache.has(key)).toBe(false)
+  })
+
+  it('classifies it as no-classes, an ordinary outcome rather than a fault', async () => {
+    const page = new Uint8Array(await readFile(NO_CLASSES_PAGE))
+    const c = clock()
+    const { fetch } = countingFetch(200, page)
+
+    await fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), new RawCache(root), {
+      term: '4269',
+      subject: 'WOLO',
+    }).then(
+      () => expect.unreachable('should have thrown'),
+      (e: unknown) => {
+        expect(e).toBeInstanceOf(UnexpectedResponseError)
+        expect((e as UnexpectedResponseError).reason).toBe('no-classes')
+        expect((e as UnexpectedResponseError).message).toContain('WOLO')
+      },
+    )
+  })
+
+  it('rejects any other non-zip payload without caching it', async () => {
+    const c = clock()
+    const { fetch } = countingFetch(200, new TextEncoder().encode('<html>gateway timeout</html>'))
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+
+    await fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), cache, key).then(
+      () => expect.unreachable('should have thrown'),
+      (e: unknown) => {
+        expect((e as UnexpectedResponseError).reason).toBe('not-an-export')
+      },
+    )
+
+    expect(await cache.has(key)).toBe(false)
+  })
+
+  it('keeps a bad whole-term response from poisoning the cache for every later run', async () => {
+    // The failure this prevents: HTML stored as __whole-term.xlsx, after which
+    // every rerun reads the poisoned entry and fails inside the zip parser.
+    const page = new Uint8Array(await readFile(NO_CLASSES_PAGE))
+    const cache = new RawCache(root)
+    const key = { term: '9999' }
+
+    const bad = clock()
+    const badFetch = countingFetch(200, page)
+    await expect(
+      fetchExport(new FetchSession({ fetch: badFetch.fetch, sleep: bad.sleep, now: bad.now }), cache, key),
+    ).rejects.toThrow(UnexpectedResponseError)
+
+    // A later good response is still able to land, because nothing was stored.
+    const good = clock()
+    const goodFetch = countingFetch(200, zipBytes())
+    const result = await fetchExport(
+      new FetchSession({ fetch: goodFetch.fetch, sleep: good.sleep, now: good.now }),
+      cache,
+      key,
+    )
+
+    expect(result.fromCache).toBe(false)
+    expect(await cache.has(key)).toBe(true)
   })
 })
 
