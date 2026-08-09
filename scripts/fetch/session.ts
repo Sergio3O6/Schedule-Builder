@@ -39,25 +39,33 @@ export interface SessionOptions {
   readonly now?: () => number
 }
 
+// Fields are declared and assigned explicitly rather than as constructor
+// parameter properties. Node runs these scripts by stripping types, which cannot
+// synthesize the assignment a parameter property implies, so `readonly x: T` in a
+// constructor signature is a runtime SyntaxError even though tsc and Vitest are
+// both perfectly happy with it.
+
 /** A single request failed. The caller may reasonably skip it and continue. */
 export class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly url: string,
-  ) {
+  readonly status: number
+  readonly url: string
+
+  constructor(status: number, url: string) {
     super(`HTTP ${status} for ${url}`)
     this.name = 'HttpError'
+    this.status = status
+    this.url = url
   }
 }
 
 /** The crawl must stop now. Never retry past this — it is not a transient error. */
 export class CrawlAbortedError extends Error {
-  constructor(
-    readonly reason: 'blocked' | 'consecutive-failures',
-    message: string,
-  ) {
+  readonly reason: 'blocked' | 'consecutive-failures'
+
+  constructor(reason: 'blocked' | 'consecutive-failures', message: string) {
     super(message)
     this.name = 'CrawlAbortedError'
+    this.reason = reason
   }
 }
 
