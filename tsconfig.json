@@ -20,6 +20,10 @@
 
     "isolatedModules": true,
     "moduleDetection": "force",
+    // scripts/ runs under Node 24's native type-stripping, and ESM there needs a
+    // full specifier — `./request.ts`, not `./request`. Legal only because we
+    // never emit (noEmit below); tsc would otherwise write imports it can't fix.
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "noEmit": true
