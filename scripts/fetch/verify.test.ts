@@ -45,24 +45,89 @@ describe('assessCoverage against the real EECS export', () => {
     expect(describeCoverage(report)).toContain('PASS')
   })
 
-  it('rejects it against the full catalogue, since 291 subjects are absent', async () => {
-    // A single-subject file must never be mistaken for a whole-term crawl.
-    const report = assessCoverage(stripHeaderRow(await eecsRows()), ['AAAS', 'BIOL', 'EECS'])
+  it('rejects it when everything absent sorts after EECS', async () => {
+    // A single-subject file must never be mistaken for a whole-term crawl: here
+    // the missing codes form an unbroken tail, which is the cap signature.
+    const report = assessCoverage(stripHeaderRow(await eecsRows()), ['EECS', 'MATH', 'WOLO'])
+    expect(report.looksTruncated).toBe(true)
     expect(isComplete(report)).toBe(false)
-    expect(report.missingSubjects).toEqual(['AAAS', 'BIOL'])
+    expect(report.missingSubjects).toEqual(['MATH', 'WOLO'])
   })
 })
 
 describe('truncation', () => {
-  it('fails when the alphabetically last subject is empty', () => {
+  it('fails when the missing subjects form an unbroken alphabetical tail', () => {
     // The shape a tail-truncating cap actually produces.
-    const rows = [...rowsFor(...Array<string>(500).fill('AAAS'))]
-    const report = assessCoverage(rows, ['AAAS', 'WOLO'])
+    const report = assessCoverage(rowsFor(...Array<string>(500).fill('AAAS')), [
+      'AAAS',
+      'MATH',
+      'WOLO',
+    ])
 
-    expect(report.lastExpectedSubject).toBe('WOLO')
-    expect(report.lastExpectedSubjectRows).toBe(0)
+    expect(report.lastPresentSubject).toBe('AAAS')
+    expect(report.firstMissingSubject).toBe('MATH')
+    expect(report.looksTruncated).toBe(true)
     expect(isComplete(report)).toBe(false)
-    expect(describeCoverage(report)).toContain('tail is exactly where a result cap shows')
+    expect(describeCoverage(report)).toContain('what a result cap looks like')
+  })
+
+  it('accepts gaps scattered through the alphabet as empty subjects', () => {
+    // The real Fall 2026 shape: 17 of 292 codes offer no classes, spread from
+    // AECL to WOLO. Requesting one individually returns KU's "no classes" page.
+    const present = ['AAAS', 'BIOL', 'EECS', 'MATH', 'WGSS']
+    const rows = rowsFor(
+      ...Array<string>(500).fill('EECS'),
+      ...present.filter((s) => s !== 'EECS'),
+    )
+    const report = assessCoverage(rows, [...present, 'AECL', 'CZCH', 'WOLO'])
+
+    expect(report.missingSubjects).toEqual(['AECL', 'CZCH', 'WOLO'])
+    expect(report.firstMissingSubject).toBe('AECL')
+    expect(report.lastPresentSubject).toBe('WGSS')
+    // AECL sorts before WGSS, so no cap could have produced this.
+    expect(report.looksTruncated).toBe(false)
+    expect(isComplete(report)).toBe(true)
+    expect(describeCoverage(report)).toContain('offering no classes this term')
+  })
+
+  it('fails when nothing came back at all', () => {
+    const report = assessCoverage([], ['AAAS', 'EECS'])
+    expect(report.looksTruncated).toBe(true)
+    expect(isComplete(report)).toBe(false)
+  })
+
+  it('fails when most of the catalogue is missing, however the gaps fall', () => {
+    // The tail test alone cannot see this: one subject out of many, with gaps on
+    // both sides of it, is not a truncation signature but is plainly broken.
+    const report = assessCoverage(rowsFor(...Array<string>(500).fill('EECS')), [
+      'AAAS',
+      'BIOL',
+      'EECS',
+      'MATH',
+      'WOLO',
+    ])
+
+    expect(report.looksTruncated).toBe(false)
+    expect(report.presentSubjectRatio).toBeCloseTo(0.2)
+    expect(isComplete(report)).toBe(false)
+    expect(describeCoverage(report)).toContain('20.0% of expected subjects')
+  })
+
+  it('accepts the real Fall 2026 shape: 275 of 292, gaps not at the tail', () => {
+    // 'M' codes are missing and 'S' codes present, so the gaps sort before the
+    // last present subject — scattered, exactly as the live data came back.
+    const present = ['EECS', ...Array.from({ length: 274 }, (_, i) => `S${String(i).padStart(3, '0')}`)]
+    const missing = Array.from({ length: 17 }, (_, i) => `M${String(i).padStart(3, '0')}`)
+
+    const report = assessCoverage(rowsFor(...Array<string>(500).fill('EECS'), ...present), [
+      ...present,
+      ...missing,
+    ])
+
+    expect(report.missingSubjects).toHaveLength(17)
+    expect(report.looksTruncated).toBe(false)
+    expect(report.presentSubjectRatio).toBeCloseTo(275 / 292, 2)
+    expect(isComplete(report)).toBe(true)
   })
 
   it('flags a suspiciously round total even when coverage looks fine', () => {
@@ -96,7 +161,7 @@ describe('missing subjects', () => {
   it('truncates a long list in the report but still states the count', () => {
     const expected = Array.from({ length: 25 }, (_, i) => `S${String(i).padStart(2, '0')}`)
     const message = describeCoverage(assessCoverage(rowsFor('EECS'), [...expected, 'EECS']))
-    expect(message).toContain('25 expected subjects absent')
+    expect(message).toContain('25 subjects absent')
     expect(message).toContain('+15 more')
   })
 })

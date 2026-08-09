@@ -8,10 +8,20 @@
  *
  * The checks here are therefore about coverage, not counts:
  *
- *   1. Every expected subject code appears.
- *   2. The alphabetically last subject is non-empty (the tail is where a cap shows).
- *   3. The total is not suspiciously round.
- *   4. A known-populated subject clears a floor, as a sanity anchor.
+ *   1. Missing subjects do not form a clean alphabetical tail.
+ *   2. The total is not suspiciously round.
+ *   3. A known-populated subject clears a floor, as a sanity anchor.
+ *
+ * Note what (1) is NOT: "every subject appears". A subject legitimately has no
+ * rows when it offers no classes that term — verified against Fall 2026, where
+ * 17 of the 292 codes are empty and requesting one individually returns KU's
+ * "No classes were found" page. Treating absence as truncation rejects a
+ * perfectly good export.
+ *
+ * The export is sorted by subject and grouped into contiguous blocks (verified:
+ * 275 blocks for 275 subjects, in alphabetical order). So a cap that truncates
+ * the tail must drop a *suffix* — every missing subject would sort after every
+ * present one. Scattered gaps are empty subjects; a clean tail is a cap.
  *
  * Any failure means fall back to the per-subject loop. None of these prove
  * completeness outright — nothing can, without a second source — but each one
@@ -30,15 +40,37 @@ const SUSPICIOUS_TOTALS: readonly number[] = [1000, 5000, 10000, 20000, 50000]
 const FLOOR_SUBJECT = 'EECS'
 const FLOOR_ROWS = 400
 
+/**
+ * Minimum share of expected subjects that must actually appear.
+ *
+ * Empty subjects are the exception, not the rule: Fall 2026 returned 275 of 292,
+ * or 94%. This guards the case the tail test cannot see — an export that is
+ * missing most of the catalogue in scattered fashion is broken regardless of how
+ * the gaps are distributed. Deliberately generous, because the tail test is the
+ * precise instrument and this is only a floor against catastrophe.
+ */
+const MIN_PRESENT_RATIO = 0.5
+
 export interface CoverageReport {
   readonly totalRows: number
   readonly rowsBySubject: ReadonlyMap<string, number>
-  /** Expected but absent. Any entry here means the export is incomplete. */
+  /**
+   * Expected but absent. Informational, NOT a failure on its own: a subject with
+   * no classes this term is legitimately absent from the export.
+   */
   readonly missingSubjects: readonly string[]
   /** Present but unexpected — catalogue drift that slipped past the form check. */
   readonly unexpectedSubjects: readonly string[]
-  readonly lastExpectedSubject: string | null
-  readonly lastExpectedSubjectRows: number
+  readonly lastPresentSubject: string | null
+  readonly firstMissingSubject: string | null
+  /**
+   * True when every missing subject sorts after every present one — the shape a
+   * tail-truncating result cap produces, and the shape scattered empty subjects
+   * cannot produce.
+   */
+  readonly looksTruncated: boolean
+  /** Share of expected subjects that appear at all. Verified 0.94 for Fall 2026. */
+  readonly presentSubjectRatio: number
   readonly suspiciouslyRoundTotal: boolean
   readonly floorSubject: string
   readonly floorSubjectRows: number
@@ -75,18 +107,31 @@ export function assessCoverage(
   }
 
   const expectedSet = new Set(expectedSubjects)
-  // Sorted so "last" is well defined regardless of how the caller ordered them.
+  // Sorted so the tail comparison below is well defined regardless of caller order.
   const sortedExpected = [...expectedSubjects].sort()
-  const lastExpectedSubject = sortedExpected.at(-1) ?? null
+  const missingSubjects = sortedExpected.filter((s) => !rowsBySubject.has(s))
+  const presentExpected = sortedExpected.filter((s) => rowsBySubject.has(s))
+
+  const lastPresentSubject = presentExpected.at(-1) ?? null
+  const firstMissingSubject = missingSubjects[0] ?? null
+
+  // Truncation drops a suffix. If anything is missing but nothing came back at
+  // all, that is the degenerate case of the same thing.
+  const looksTruncated =
+    missingSubjects.length > 0 &&
+    (lastPresentSubject === null ||
+      (firstMissingSubject !== null && firstMissingSubject > lastPresentSubject))
 
   return {
     totalRows: dataRows.length,
     rowsBySubject,
-    missingSubjects: sortedExpected.filter((s) => !rowsBySubject.has(s)),
+    missingSubjects,
     unexpectedSubjects: [...rowsBySubject.keys()].filter((s) => !expectedSet.has(s)).sort(),
-    lastExpectedSubject,
-    lastExpectedSubjectRows:
-      lastExpectedSubject === null ? 0 : (rowsBySubject.get(lastExpectedSubject) ?? 0),
+    lastPresentSubject,
+    firstMissingSubject,
+    looksTruncated,
+    presentSubjectRatio:
+      sortedExpected.length === 0 ? 1 : presentExpected.length / sortedExpected.length,
     suspiciouslyRoundTotal: SUSPICIOUS_TOTALS.includes(dataRows.length),
     floorSubject: FLOOR_SUBJECT,
     floorSubjectRows: rowsBySubject.get(FLOOR_SUBJECT) ?? 0,
@@ -96,8 +141,8 @@ export function assessCoverage(
 /** True when the export looks complete enough to trust as a whole-term crawl. */
 export function isComplete(report: CoverageReport): boolean {
   return (
-    report.missingSubjects.length === 0 &&
-    report.lastExpectedSubjectRows > 0 &&
+    !report.looksTruncated &&
+    report.presentSubjectRatio >= MIN_PRESENT_RATIO &&
     !report.suspiciouslyRoundTotal &&
     report.floorSubjectRows >= FLOOR_ROWS
   )
@@ -113,12 +158,19 @@ export function describeCoverage(report: CoverageReport): string {
     const shown = report.missingSubjects.slice(0, 10).join(', ')
     const more =
       report.missingSubjects.length > 10 ? ` (+${report.missingSubjects.length - 10} more)` : ''
-    lines.push(`FAIL: ${report.missingSubjects.length} expected subjects absent: ${shown}${more}`)
+    const verdict = report.looksTruncated
+      ? 'FAIL: they form an unbroken alphabetical tail, which is what a result cap looks like'
+      : 'ok: scattered through the alphabet, consistent with subjects offering no classes this term'
+    lines.push(`${report.missingSubjects.length} subjects absent (${shown}${more}) — ${verdict}.`)
   }
-  if (report.lastExpectedSubject !== null && report.lastExpectedSubjectRows === 0) {
+  if (report.looksTruncated && report.missingSubjects.length === 0) {
+    lines.push('FAIL: nothing came back at all.')
+  }
+  if (report.presentSubjectRatio < MIN_PRESENT_RATIO) {
+    const percent = (report.presentSubjectRatio * 100).toFixed(1)
     lines.push(
-      `FAIL: last subject ${report.lastExpectedSubject} has no rows — ` +
-        'the tail is exactly where a result cap shows.',
+      `FAIL: only ${percent}% of expected subjects appear. Empty subjects are the ` +
+        'exception, so most of the catalogue missing means a broken export, not a quiet term.',
     )
   }
   if (report.suspiciouslyRoundTotal) {
