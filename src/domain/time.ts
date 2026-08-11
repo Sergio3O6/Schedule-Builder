@@ -200,7 +200,13 @@ function parseMonthDay(raw: string): MonthDay {
 
   const month = MONTHS.indexOf((match[1] ?? '').toUpperCase())
   if (month < 0) throw new Error(`unknown month in ${JSON.stringify(raw)}`)
-  return { month, day: Number(match[2]) }
+
+  // The pattern accepts one or two digits and says nothing about their value.
+  // Whether the day exists in THIS month is settled later by isoDate(), once the
+  // year is known and February can be answered properly.
+  const day = Number(match[2])
+  if (day < 1 || day > 31) throw new Error(`day out of range in ${JSON.stringify(raw)}`)
+  return { month, day }
 }
 
 const iso = (year: number, month: number, day: number): IsoDate =>
@@ -219,19 +225,49 @@ const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
  * silent hour of drift; and it returns NaN for anything with a time component
  * appended, which is worse, because NaN propagates without complaint.
  *
- * What this does NOT yet check is whether the day exists: `2026-09-31` parses
- * cheerfully as October 1st. That is a real defect and it is fixed separately,
- * where the MMM-DD parser that produces such a date is also fixed.
+ * Existence is checked by round-tripping rather than by trusting the parse.
+ * `Date.parse` rejects month 13 but happily ROLLS OVER an impossible day:
+ * `2026-09-31` becomes October 1st and `2026-02-29` becomes March 1st, both
+ * without complaint. The section then gains a day it does not run, and in the
+ * February case it gains one only in non-leap years, which is the kind of bug
+ * that surfaces once every four years. Reading the date back out of the parsed
+ * value catches every such case, leap rules included, without stating them.
  */
 export function isoDate(raw: string): IsoDate {
   if (!ISO_DATE_PATTERN.test(raw)) {
     throw new Error(`not an ISO date (expected YYYY-MM-DD): ${JSON.stringify(raw)}`)
   }
   const date = raw as IsoDate
-  if (Number.isNaN(utcMs(date))) {
+  const ms = utcMs(date)
+  if (Number.isNaN(ms)) {
     throw new Error(`ISO date does not exist: ${JSON.stringify(raw)}`)
   }
+  const roundTrip = new Date(ms).toISOString().slice(0, 10)
+  if (roundTrip !== raw) {
+    throw new Error(`ISO date does not exist: ${JSON.stringify(raw)} (would be ${roundTrip})`)
+  }
   return date
+}
+
+/**
+ * The term's bounds in milliseconds, with the epoch checked.
+ *
+ * Belt and braces over the brand: a cast can still smuggle an unvalidated
+ * calendar in, and this is the one error worth paying two comparisons to catch,
+ * because its symptom is every conflict check quietly answering "no clash". Every
+ * function that reads a calendar's dates goes through here, so there is no path
+ * on which a NaN can begin propagating.
+ */
+function termBounds(calendar: TermCalendar): { readonly start: number; readonly end: number } {
+  const start = utcMs(calendar.startDate)
+  const end = utcMs(calendar.endDate)
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    throw new Error(
+      'term epoch is not a parseable date: ' +
+        `${JSON.stringify(calendar.startDate)}..${JSON.stringify(calendar.endDate)}`,
+    )
+  }
+  return { start, end }
 }
 
 /**
@@ -252,26 +288,62 @@ export function termCalendar(term: TermCode, startDate: string, endDate: string)
 }
 
 /**
- * Reconstructs the calendar year for a begin date.
+ * Reconstructs the calendar year of a Begin date, judged by the whole span.
  *
- * The export prints MMM-DD with no year at all, so the year has to be inferred.
- * Anchoring on "nearest to the term start" handles both ordinary sections and
- * the full-year ones: AUG-13 in a Fall 2026 term resolves to 2026, while the
- * same AUG-13 under a Spring 2027 term resolves to 2026 as well, because that is
- * the August adjacent to a January start.
+ * The export prints MMM-DD with no year, so the year has to be inferred, and the
+ * only evidence available is the term the row was published under. The rule is
+ * therefore: of the three possible years, take the one whose resulting span sits
+ * best against that term — most days of overlap, and failing any overlap, the
+ * smallest gap to it.
+ *
+ * Judging the SPAN rather than the begin date alone is what makes this correct.
+ * The previous version measured only "how far is this Begin from the term start",
+ * which is right within about six months of it and wrong outside: a Spring 2027
+ * section running JUL-06..MAY-26 came back as 2027-07-06..2028-05-26, a full year
+ * late, overlapping the term it belongs to by nothing at all. Measured as a span,
+ * 2026-07-06..2027-05-26 covers the whole term and wins outright.
+ *
+ * Candidates are tried base year first, then forward, then back, so a genuine tie
+ * — constructible across a leap day — resolves toward the term's own year rather
+ * than the past.
  */
-function yearNearestTermStart(md: MonthDay, calendarStart: IsoDate): number {
-  const anchor = utcMs(calendarStart)
-  const base = Number(calendarStart.slice(0, 4))
+function chooseStartYear(from: MonthDay, to: MonthDay, wraps: boolean, calendar: TermCalendar) {
+  const { start: termStart, end: termEnd } = termBounds(calendar)
+  const base = Number(calendar.startDate.slice(0, 4))
 
   let best = base
-  let bestDistance = Number.POSITIVE_INFINITY
-  for (const candidate of [base - 1, base, base + 1]) {
-    const distance = Math.abs(utcMs(iso(candidate, md.month, md.day)) - anchor)
-    if (distance < bestDistance) {
-      best = candidate
-      bestDistance = distance
+  let bestOverlap = Number.NEGATIVE_INFINITY
+
+  for (const candidate of [base, base + 1, base - 1]) {
+    let start: number
+    let end: number
+    try {
+      start = utcMs(iso(candidate, from.month, from.day))
+      end = utcMs(iso(candidate + (wraps ? 1 : 0), to.month, to.day))
+    } catch {
+      // February 29th exists in one candidate year out of four. A year that does
+      // not contain the date is not a candidate; only if none of the three
+      // contain it is the date itself impossible, which is caught below.
+      continue
     }
+
+    // Inclusive of both endpoints, so a single day inside the term scores one day
+    // rather than zero. When the span misses the term entirely this goes
+    // negative, and its magnitude is the distance to the term — so one number
+    // ranks both cases and no separate tie-break is needed.
+    const overlap = Math.min(end, termEnd) - Math.max(start, termStart) + MS_PER_DAY
+
+    if (overlap > bestOverlap) {
+      best = candidate
+      bestOverlap = overlap
+    }
+  }
+
+  if (bestOverlap === Number.NEGATIVE_INFINITY) {
+    throw new Error(
+      `date does not exist in ${base - 1}, ${base} or ${base + 1}: ` +
+        `${MONTHS[from.month]}-${from.day}..${MONTHS[to.month]}-${to.day}`,
+    )
   }
   return best
 }
@@ -310,8 +382,8 @@ export function parseDateRange(
   const from = parseMonthDay(begin)
   const to = parseMonthDay(end)
 
-  const startYear = yearNearestTermStart(from, calendar.startDate)
   const wraps = to.month < from.month || (to.month === from.month && to.day < from.day)
+  const startYear = chooseStartYear(from, to, wraps, calendar)
 
   return {
     startDate: iso(startYear, from.month, from.day),
@@ -324,13 +396,7 @@ export function parseDateRange(
  * normalizer and the client so the two cannot drift.
  */
 export function toDayOffset(calendar: TermCalendar, date: IsoDate): DayOffset {
-  const epoch = utcMs(calendar.startDate)
-  // Belt and braces over the brand: a cast can still smuggle an unvalidated
-  // epoch in here, and this is the one error worth paying a comparison to catch,
-  // because its symptom is every conflict check quietly answering "no clash".
-  if (Number.isNaN(epoch)) {
-    throw new Error(`term epoch is not a parseable date: ${JSON.stringify(calendar.startDate)}`)
-  }
+  const { start: epoch } = termBounds(calendar)
   const ms = utcMs(date)
   if (Number.isNaN(ms)) throw new Error(`unparseable ISO date: ${JSON.stringify(date)}`)
   return Math.round((ms - epoch) / MS_PER_DAY) as DayOffset

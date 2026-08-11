@@ -195,6 +195,90 @@ describe('parseDateRange', () => {
       expect(() => parseDateRange(fall2026, bad, 'DEC-18'), bad).toThrow()
     }
   })
+
+  it('rejects a day outside any month', () => {
+    for (const bad of ['SEP-00', 'SEP-32', 'SEP-99']) {
+      expect(() => parseDateRange(fall2026, bad, 'DEC-18'), bad).toThrow(/day out of range/)
+    }
+  })
+
+  it('rejects a day that does not exist in its own month', () => {
+    // Date.parse rolls these over without complaint: SEP-31 becomes October 1st,
+    // FEB-30 becomes March 2nd. The section would gain a day it does not run,
+    // and the old day-field check — there wasn't one — could not see it.
+    for (const bad of ['SEP-31', 'FEB-30', 'APR-31', 'JUN-31']) {
+      expect(() => parseDateRange(fall2026, bad, 'DEC-18'), bad).toThrow(/does not exist/)
+    }
+  })
+
+  it('accepts February 29th in a leap year', () => {
+    const spring2028 = termCalendar(termCode('4282'), '2028-01-18', '2028-05-12')
+    expect(parseDateRange(spring2028, 'FEB-29', 'MAY-12').startDate).toBe('2028-02-29')
+  })
+
+  it('resolves February 29th to the year that has one, rather than rolling to March', () => {
+    // The candidate years are 2026, 2027 and 2028 here, and only one of them
+    // contains the date. A year that does not is not a candidate.
+    const spring2027 = termCalendar(termCode('4272'), '2027-01-19', '2027-05-14')
+    expect(parseDateRange(spring2027, 'FEB-29', 'MAY-14').startDate).toBe('2028-02-29')
+  })
+})
+
+describe('parseDateRange — reconstructing the year from the whole span', () => {
+  const spring2027 = termCalendar(termCode('4272'), '2027-01-19', '2027-05-14')
+  const summer2027 = termCalendar(termCode('4276'), '2027-06-07', '2027-08-06')
+
+  it('anchors a long span on the term it overlaps, not on the nearer endpoint', () => {
+    // The defect: year inference measured only the distance from Begin to the
+    // term START, which is right within about six months of it and wrong outside.
+    // JUL-06 is 53 days after Spring 2027 ends and 197 days before it begins, so
+    // "nearest" chose 2027 — giving 2027-07-06..2028-05-26, a span that overlaps
+    // the term it was published under by nothing at all.
+    expect(parseDateRange(spring2027, 'JUL-06', 'MAY-26')).toEqual({
+      startDate: '2026-07-06',
+      endDate: '2027-05-26',
+    })
+  })
+
+  it('keeps an ordinary summer session inside its own summer', () => {
+    expect(parseDateRange(summer2027, 'JUN-08', 'JUL-31')).toEqual({
+      startDate: '2027-06-08',
+      endDate: '2027-07-31',
+    })
+  })
+
+  it('places a rotation that ends before the term starts in the adjacent months', () => {
+    // 1,010 live rows begin before August in a Fall export — prior-summer
+    // rotations, almost all MED. Nothing overlaps, so the nearest year wins.
+    expect(parseDateRange(fall2026, 'JUN-01', 'JUL-31')).toEqual({
+      startDate: '2026-06-01',
+      endDate: '2026-07-31',
+    })
+  })
+
+  it('still reads a full-year span under a spring term as beginning last August', () => {
+    expect(parseDateRange(spring2027, 'AUG-13', 'MAY-26')).toEqual({
+      startDate: '2026-08-13',
+      endDate: '2027-05-26',
+    })
+  })
+
+  it('produces a span that overlaps the term for every real live shape', () => {
+    // Every Begin/End pair in the Fall 2026 export, as distinct shapes. The
+    // property that matters is not the exact year but that the section lands
+    // where it can conflict with the rest of the term.
+    for (const [begin, end] of [
+      ['AUG-24', 'DEC-18'],
+      ['AUG-13', 'MAY-26'],
+      ['AUG-12', 'MAY-26'],
+      ['DEC-14', 'JAN-03'],
+      ['OCT-21', 'DEC-18'],
+      ['SEP-22', 'SEP-22'],
+    ] as const) {
+      const span = dateSpan(fall2026, begin, end)
+      expect(span.endDay, `${begin}..${end}`).toBeGreaterThanOrEqual(span.startDay)
+    }
+  })
 })
 
 describe('termCalendar', () => {
