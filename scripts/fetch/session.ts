@@ -32,7 +32,13 @@ export interface SessionOptions {
    * struggling, and that is the wrong moment to keep to schedule.
    */
   readonly minSpacingMs?: number
-  /** Consecutive non-200s tolerated before the crawl is abandoned entirely. */
+  /**
+   * Consecutive failed attempts tolerated before the crawl is abandoned.
+   *
+   * A failure is any attempt that did not yield a body: a non-200, a connection
+   * that never opened, or one that dropped while the body was being read. All
+   * three mean the same thing to the host, so all three count.
+   */
   readonly maxConsecutiveFailures?: number
   readonly fetch?: FetchLike
   readonly sleep?: (ms: number) => Promise<void>
@@ -72,6 +78,10 @@ export class CrawlAbortedError extends Error {
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
+/** Whatever was thrown, in a form fit for an abort message. */
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
 export class FetchSession {
   readonly #minSpacingMs: number
   readonly #maxConsecutiveFailures: number
@@ -100,7 +110,7 @@ export class FetchSession {
     this.#now = options.now ?? Date.now
   }
 
-  /** Requests made so far that returned 200. Used by the caller for reporting. */
+  /** Failed attempts since the last body was received. Zero after any success. */
   get consecutiveFailures(): number {
     return this.#consecutiveFailures
   }
@@ -127,13 +137,29 @@ export class FetchSession {
 
     await this.#waitForSlot()
 
+    try {
+      return await this.#attempt(url)
+    } finally {
+      // Stamped here, around the WHOLE attempt, so the quiet period starts when
+      // the body finished arriving rather than when its headers did. Stamping at
+      // the headers meant a four-second body was subtracted from the next gap:
+      // with 1.5s spacing the observed quiet period was zero, on precisely the
+      // slow responses the spacing exists to be gentle about. A failed attempt
+      // consumes a slot too — a connection that fails fast must not become a way
+      // to hammer the host.
+      this.#lastFinishedAt = this.#now()
+    }
+  }
+
+  async #attempt(url: string): Promise<Uint8Array> {
     let response: ResponseLike
     try {
       response = await this.#fetch(url, { headers: { 'User-Agent': USER_AGENT } })
-    } finally {
-      // Network errors still consume a slot. A connection that fails fast must
-      // not become a way to hammer the host.
-      this.#lastFinishedAt = this.#now()
+    } catch (error) {
+      // A connection that never opened is a failure like any other. It used to
+      // bypass the counter entirely, so a host resetting every connection would
+      // be asked 292 times without the crawl ever deciding to stop.
+      throw this.#recordFailure(describeError(error), url) ?? error
     }
 
     if (response.status === 403 || response.status === 429) {
@@ -149,19 +175,35 @@ export class FetchSession {
     }
 
     if (response.status !== 200) {
-      this.#consecutiveFailures += 1
-      if (this.#consecutiveFailures >= this.#maxConsecutiveFailures) {
-        throw (this.#aborted = new CrawlAbortedError(
-          'consecutive-failures',
-          `${this.#consecutiveFailures} consecutive failures, last was ` +
-            `HTTP ${response.status} for ${url}. Stopping.`,
-        ))
-      }
-      throw new HttpError(response.status, url)
+      throw this.#recordFailure(`HTTP ${response.status}`, url) ?? new HttpError(response.status, url)
+    }
+
+    // Read the body before declaring success. A 200 whose stream dies halfway is
+    // a failed attempt, not a successful one, and calling it a success would
+    // reset the streak that is meant to notice a host in trouble.
+    let body: ArrayBuffer
+    try {
+      body = await response.arrayBuffer()
+    } catch (error) {
+      throw this.#recordFailure(describeError(error), url) ?? error
     }
 
     this.#consecutiveFailures = 0
-    return new Uint8Array(await response.arrayBuffer())
+    return new Uint8Array(body)
+  }
+
+  /**
+   * Counts one failed attempt, returning an abort when the streak has run out
+   * and null when the caller should throw its own, more specific error.
+   */
+  #recordFailure(description: string, url: string): CrawlAbortedError | null {
+    this.#consecutiveFailures += 1
+    if (this.#consecutiveFailures < this.#maxConsecutiveFailures) return null
+    return (this.#aborted = new CrawlAbortedError(
+      'consecutive-failures',
+      `${this.#consecutiveFailures} consecutive failures, last was ` +
+        `${description} for ${url}. Stopping.`,
+    ))
   }
 
   /** Sleep off whatever remains of the quiet period. No wait before the first. */
