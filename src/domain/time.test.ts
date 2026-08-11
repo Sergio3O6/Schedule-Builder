@@ -1,0 +1,254 @@
+import { describe, expect, it } from 'vitest'
+import { termCode } from './ids.ts'
+import {
+  dateSpan,
+  dayMaskOverlaps,
+  minuteOfDay,
+  parseClockTime,
+  parseDateRange,
+  parseDayMask,
+  spansOverlap,
+  termYear,
+  timeOverlaps,
+  toDayOffset,
+} from './time.ts'
+import type { TermCalendar } from './time.ts'
+
+/** Fall 2026, the modal span of the live export. */
+const fall2026: TermCalendar = {
+  term: termCode('4269'),
+  startDate: '2026-08-24',
+  endDate: '2026-12-18',
+}
+
+describe('parseDayMask', () => {
+  it('reads the two-letter tokens before the single letters', () => {
+    // 'Th' must not read as 'T' plus a stray 'h'.
+    expect(parseDayMask('TuTh')).toBe(parseDayMask('Tu') | parseDayMask('Th'))
+    expect(parseDayMask('Th')).not.toBe(parseDayMask('Tu'))
+  })
+
+  it('reads every pattern the live export contains', () => {
+    for (const pattern of ['MWF', 'TuTh', 'MW', 'WF', 'M', 'Tu', 'W', 'Th', 'F', 'Sa', 'MTuWThF']) {
+      expect(() => parseDayMask(pattern), pattern).not.toThrow()
+      expect(parseDayMask(pattern), pattern).toBeGreaterThan(0)
+    }
+  })
+
+  it('handles weekend classes, which the term really does contain', () => {
+    // 410 Saturday rows in Fall 2026.
+    expect(parseDayMask('Sa')).not.toBe(0)
+    expect(parseDayMask('Su')).not.toBe(0)
+    expect(parseDayMask('Sa')).not.toBe(parseDayMask('Su'))
+  })
+
+  it('gives every day its own bit', () => {
+    const masks = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa'].map(parseDayMask)
+    expect(new Set(masks).size).toBe(7)
+    expect(masks.reduce((a, b) => a | b, 0)).toBe(0b1111111)
+  })
+
+  it('treats a blank as no days rather than as an error', () => {
+    expect(parseDayMask('')).toBe(0)
+    expect(parseDayMask('   ')).toBe(0)
+  })
+
+  it('throws on an unrecognized token instead of dropping it', () => {
+    // A day we fail to parse is a day the student attends and we never schedule.
+    for (const bad of ['MX', 'Q', 'MTWRF']) {
+      expect(() => parseDayMask(bad), bad).toThrow(/unrecognized day token/)
+    }
+  })
+})
+
+describe('dayMaskOverlaps', () => {
+  it('detects a shared day', () => {
+    expect(dayMaskOverlaps(parseDayMask('MWF'), parseDayMask('MW'))).toBe(true)
+  })
+
+  it('reports disjoint day sets as clear', () => {
+    expect(dayMaskOverlaps(parseDayMask('MWF'), parseDayMask('TuTh'))).toBe(false)
+  })
+
+  it('never overlaps with no days at all', () => {
+    expect(dayMaskOverlaps(parseDayMask('MWF'), parseDayMask(''))).toBe(false)
+  })
+})
+
+describe('parseClockTime', () => {
+  it('reads the export format', () => {
+    expect(parseClockTime('09:00 AM')).toBe(9 * 60)
+    expect(parseClockTime('02:00 PM')).toBe(14 * 60)
+    expect(parseClockTime('09:50 AM')).toBe(9 * 60 + 50)
+    expect(parseClockTime('11:59 PM')).toBe(23 * 60 + 59)
+  })
+
+  it('handles the noon and midnight boundaries', () => {
+    expect(parseClockTime('12:00 PM')).toBe(12 * 60)
+    expect(parseClockTime('12:30 AM')).toBe(30)
+  })
+
+  it('parses 12:00 AM as midnight and takes no view on what it means', () => {
+    // It is both a real time and the export's "no meeting" marker. Classifying
+    // it needs the whole row, so that decision lives in the meeting layer.
+    expect(parseClockTime('12:00 AM')).toBe(0)
+  })
+
+  it('returns null for values that are not clock times', () => {
+    for (const raw of ['APPT', '', '  ', 'TBA', '25:00 AM', '09:60 AM', '00:30 AM']) {
+      expect(parseClockTime(raw), raw).toBeNull()
+    }
+  })
+})
+
+describe('timeOverlaps', () => {
+  it('lets back-to-back classes coexist', () => {
+    // One ends 09:50, the next starts 09:50. Half-open, so no conflict.
+    const a = { s: minuteOfDay(9 * 60), e: minuteOfDay(9 * 60 + 50) }
+    const b = { s: minuteOfDay(9 * 60 + 50), e: minuteOfDay(10 * 60 + 40) }
+    expect(timeOverlaps(a.s, a.e, b.s, b.e)).toBe(false)
+  })
+
+  it('catches a one-minute overlap', () => {
+    const a = { s: minuteOfDay(540), e: minuteOfDay(591) }
+    const b = { s: minuteOfDay(590), e: minuteOfDay(640) }
+    expect(timeOverlaps(a.s, a.e, b.s, b.e)).toBe(true)
+  })
+
+  it('catches full containment either way round', () => {
+    const outer = { s: minuteOfDay(540), e: minuteOfDay(720) }
+    const inner = { s: minuteOfDay(600), e: minuteOfDay(660) }
+    expect(timeOverlaps(outer.s, outer.e, inner.s, inner.e)).toBe(true)
+    expect(timeOverlaps(inner.s, inner.e, outer.s, outer.e)).toBe(true)
+  })
+})
+
+describe('termYear', () => {
+  it('decodes the PeopleSoft 4YYS code', () => {
+    expect(termYear(termCode('4269'))).toBe(2026)
+    expect(termYear(termCode('4262'))).toBe(2026)
+    expect(termYear(termCode('4259'))).toBe(2025)
+  })
+})
+
+describe('parseDateRange', () => {
+  it('reconstructs the year for an ordinary full-term span', () => {
+    expect(parseDateRange(fall2026, 'AUG-24', 'DEC-18')).toEqual({
+      startDate: '2026-08-24',
+      endDate: '2026-12-18',
+    })
+  })
+
+  it('rolls the end year forward when the span crosses New Year', () => {
+    // AUG-13..MAY-26 appears in six live rows. Reconstructing both years as 2026
+    // produces an inverted span whose overlap test silently returns false.
+    expect(parseDateRange(fall2026, 'AUG-13', 'MAY-26')).toEqual({
+      startDate: '2026-08-13',
+      endDate: '2027-05-26',
+    })
+  })
+
+  it('handles a single-day session', () => {
+    expect(parseDateRange(fall2026, 'SEP-22', 'SEP-22')).toEqual({
+      startDate: '2026-09-22',
+      endDate: '2026-09-22',
+    })
+  })
+
+  it('handles a partial term inside the main one', () => {
+    expect(parseDateRange(fall2026, 'OCT-21', 'DEC-18')).toEqual({
+      startDate: '2026-10-21',
+      endDate: '2026-12-18',
+    })
+  })
+
+  it('anchors an August start to the previous year under a spring term', () => {
+    // A full-year course listed under Spring 2027 begins in the August adjacent
+    // to a January start, not eight months after it.
+    const spring2027: TermCalendar = {
+      term: termCode('4272'),
+      startDate: '2027-01-19',
+      endDate: '2027-05-14',
+    }
+    expect(parseDateRange(spring2027, 'AUG-13', 'MAY-26')).toEqual({
+      startDate: '2026-08-13',
+      endDate: '2027-05-26',
+    })
+  })
+
+  it('falls back to the whole term when both dates are blank', () => {
+    // 25 live rows have no dates at all. They are unscheduled sections (APPT, no
+    // meeting days) that still belong to the term, so the term span is correct.
+    expect(parseDateRange(fall2026, '', '')).toEqual({
+      startDate: '2026-08-24',
+      endDate: '2026-12-18',
+    })
+    expect(parseDateRange(fall2026, '   ', '  ')).toEqual({
+      startDate: '2026-08-24',
+      endDate: '2026-12-18',
+    })
+  })
+
+  it('refuses a half-open range rather than inventing the missing end', () => {
+    // Never occurs live — always both blank or neither — so one blank means
+    // something changed and guessing would publish a date KU did not.
+    expect(() => parseDateRange(fall2026, 'AUG-24', '')).toThrow(/half-open date range/)
+    expect(() => parseDateRange(fall2026, '', 'DEC-18')).toThrow(/half-open date range/)
+  })
+
+  it('throws on an unparseable date rather than guessing', () => {
+    for (const bad of ['AUG', 'XYZ-12', '13-AUG']) {
+      expect(() => parseDateRange(fall2026, bad, 'DEC-18'), bad).toThrow()
+    }
+  })
+})
+
+describe('toDayOffset', () => {
+  it('puts the term start at zero', () => {
+    expect(toDayOffset(fall2026, '2026-08-24')).toBe(0)
+  })
+
+  it('counts whole days forward', () => {
+    expect(toDayOffset(fall2026, '2026-08-25')).toBe(1)
+    expect(toDayOffset(fall2026, '2026-12-18')).toBe(116)
+  })
+
+  it('goes negative before the term starts', () => {
+    expect(toDayOffset(fall2026, '2026-08-13')).toBe(-11)
+  })
+
+  it('is unaffected by daylight saving, which falls inside the term', () => {
+    // US DST ends 2026-11-01. A naive local-time implementation drifts an hour
+    // here and rounds to the wrong day.
+    const before = toDayOffset(fall2026, '2026-10-31')
+    const after = toDayOffset(fall2026, '2026-11-02')
+    expect(after - before).toBe(2)
+  })
+})
+
+describe('dateSpan and spansOverlap', () => {
+  const span = (b: string, e: string) => dateSpan(fall2026, b, e)
+
+  it('overlaps when two spans share any day', () => {
+    expect(spansOverlap(span('AUG-24', 'DEC-18'), span('OCT-21', 'DEC-18'))).toBe(true)
+  })
+
+  it('overlaps on a single shared day, inclusively', () => {
+    expect(spansOverlap(span('AUG-24', 'SEP-22'), span('SEP-22', 'DEC-18'))).toBe(true)
+  })
+
+  it('does not overlap disjoint spans', () => {
+    expect(spansOverlap(span('AUG-24', 'SEP-30'), span('OCT-01', 'DEC-18'))).toBe(false)
+  })
+
+  it('makes the year-wrap span overlap the main term, as it must', () => {
+    // The bug this guards: both years read as 2026 gives an inverted span that
+    // overlaps nothing, so a year-long class conflicts with nothing all term.
+    expect(spansOverlap(span('AUG-13', 'MAY-26'), span('AUG-24', 'DEC-18'))).toBe(true)
+  })
+
+  it('produces a forward-running span for the year-wrap case', () => {
+    const wrapped = span('AUG-13', 'MAY-26')
+    expect(wrapped.endDay).toBeGreaterThan(wrapped.startDay)
+  })
+})
