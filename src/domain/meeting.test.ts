@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { termCode } from './ids.ts'
-import { dateSpan, parseClockTime, parseDayMask, termCalendar } from './time.ts'
+import { dateSpan, END_OF_DAY, parseClockTime, parseDayMask, termCalendar } from './time.ts'
 import {
   anyMeetingConflicts,
   classifyMeeting,
@@ -70,8 +70,24 @@ describe('classifyMeeting — the sentinels', () => {
     expect(m.kind === 'unscheduled' && m.reason).toBe('tba')
   })
 
-  it('rejects a backwards time range', () => {
-    expect(classifyMeeting(input('MWF', '02:00 PM', '09:00 AM')).kind).toBe('unscheduled')
+  it('rejects a backwards time range as malformed, not as a missing time', () => {
+    const m = classifyMeeting(input('MWF', '02:00 PM', '09:00 AM'))
+    expect(m.kind).toBe('unscheduled')
+    // Saying "no published time" here would be a lie: KU published two of them.
+    expect(m.kind === 'unscheduled' && m.reason).toBe('malformed-time')
+  })
+
+  it('rejects a zero-duration meeting that is not the midnight sentinel', () => {
+    const m = classifyMeeting(input('MWF', '09:00 AM', '09:00 AM'))
+    expect(m.kind === 'unscheduled' && m.reason).toBe('malformed-time')
+  })
+
+  it('rejects a meeting that wraps past midnight, which this model cannot hold', () => {
+    // 10:00 PM–01:00 AM is two calendar days, and one day mask cannot say which
+    // hours fall on which. Better visible as malformed than silently placed.
+    const m = classifyMeeting(input('MWF', '10:00 PM', '01:00 AM'))
+    expect(m.kind).toBe('unscheduled')
+    expect(m.kind === 'unscheduled' && m.reason).toBe('malformed-time')
   })
 
   it('keeps the date span and place on unscheduled meetings', () => {
@@ -94,6 +110,29 @@ describe('classifyMeeting — real meetings', () => {
 
   it('accepts a Saturday section', () => {
     expect(classifyMeeting(input('Sa', '09:00 AM', '11:50 AM')).kind).toBe('scheduled')
+  })
+
+  it('accepts an evening class that runs until midnight', () => {
+    // The regression. 09:00 PM–12:00 AM is three hours of lecture, but the end
+    // parses to minute 0, so end <= start and the previous version filed it as
+    // 'no-published-time' — unscheduled, therefore structurally unable to reach
+    // the conflict checker, therefore a student told the evening was free.
+    const m = classifyMeeting(input('MW', '09:00 PM', '12:00 AM'))
+    expect(m.kind).toBe('scheduled')
+    if (m.kind !== 'scheduled') return
+    expect(m.start).toBe(21 * 60)
+    expect(m.end).toBe(END_OF_DAY)
+    expect(m.end - m.start).toBe(180)
+  })
+
+  it('accepts a class that starts at midnight, the mirror of the sentinel', () => {
+    // Only BOTH ends at minute 0 is the placeholder. A real duration from
+    // midnight is a real meeting, however odd it looks.
+    const m = classifyMeeting(input('Sa', '12:00 AM', '01:00 AM'))
+    expect(m.kind).toBe('scheduled')
+    if (m.kind !== 'scheduled') return
+    expect(m.start).toBe(0)
+    expect(m.end).toBe(60)
   })
 
   it('accepts an afternoon TuTh section', () => {
@@ -152,6 +191,20 @@ describe('meetingsConflict', () => {
         meeting('MWF', '09:00 AM', '09:50 AM'),
       ),
     ).toBe(true)
+  })
+
+  it('catches a clash inside a class that runs to midnight', () => {
+    // The point of the fix, stated as behaviour: the evening class is now on the
+    // calendar, so something overlapping it is refused rather than allowed.
+    expect(
+      meetingsConflict(meeting('MW', '09:00 PM', '12:00 AM'), meeting('MW', '11:00 PM', '11:50 PM')),
+    ).toBe(true)
+  })
+
+  it('still lets a class end where the midnight class begins', () => {
+    expect(
+      meetingsConflict(meeting('MW', '09:00 PM', '12:00 AM'), meeting('MW', '07:00 PM', '09:00 PM')),
+    ).toBe(false)
   })
 
   it('is symmetric', () => {

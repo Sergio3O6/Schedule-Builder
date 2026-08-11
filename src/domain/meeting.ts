@@ -15,7 +15,7 @@
  * at all, because it does not typecheck there.
  */
 
-import { dayMaskOverlaps, spansOverlap, timeOverlaps } from './time.ts'
+import { dayMaskOverlaps, END_OF_DAY, spansOverlap, timeOverlaps } from './time.ts'
 import type { DateSpan, DayMask, MinuteOfDay } from './time.ts'
 
 export interface Place {
@@ -35,7 +35,10 @@ export interface ScheduledMeeting {
   /** Invariant: non-zero. A meeting on no days is not scheduled. */
   readonly days: DayMask
   readonly start: MinuteOfDay
-  /** Invariant: strictly greater than start. */
+  /**
+   * Invariant: strictly greater than start. A class ending at midnight carries
+   * END_OF_DAY (1440), not 0 — 0 would run the meeting backwards.
+   */
   readonly end: MinuteOfDay
   readonly span: DateSpan
   readonly place: Place
@@ -57,6 +60,19 @@ export type UnscheduledReason =
   | 'no-published-time'
   /** Blank, unparseable, or a time with no days to put it on. */
   | 'tba'
+  /**
+   * An end at or before the start, where the end is not midnight.
+   *
+   * Two things produce this and they cannot be told apart from the row: a data
+   * error, or a meeting that wraps past midnight (10:00 PM–01:00 AM), which this
+   * model does not represent — a wrapped meeting occupies two different days and
+   * a single day mask cannot say so.
+   *
+   * Either way it must be its own reason. Filing it under 'no-published-time'
+   * would state that KU published no time, which is false, and would hide the
+   * one shape that means "look at this row".
+   */
+  | 'malformed-time'
 
 export interface UnscheduledMeeting {
   readonly kind: 'unscheduled'
@@ -100,11 +116,24 @@ export function classifyMeeting(input: MeetingInput): Meeting {
     }
   }
 
-  // Zero duration is a placeholder, not a meeting. Live data always spells it
-  // 12:00 AM–12:00 AM; treating it as a real event at minute 0 is precisely the
-  // failure this module exists to prevent.
-  if (end <= start) {
+  // The sentinel, and only the sentinel: BOTH ends at minute 0. Treating this as
+  // a real event at midnight is precisely the failure this module exists to
+  // prevent — 4,115 rows carry it, and they would all conflict with each other.
+  if (start === 0 && end === 0) {
     return { kind: 'unscheduled', reason: 'no-published-time', span, place }
+  }
+
+  // A real start with an end of 12:00 AM is a class that runs until midnight,
+  // not a placeholder. 09:00 PM–12:00 AM is three hours of evening lecture; read
+  // as 1260..0 it is negative, and the previous version filed it as "no
+  // published time" — which made a real class structurally unable to reach the
+  // conflict checker, so a student would be told the evening was free. No live
+  // row has this shape today (the latest end in Fall 2026 is 10:00 PM), so this
+  // is a trap set for the term that does, not a bug being observed.
+  const finish = end === 0 ? END_OF_DAY : end
+
+  if (finish <= start) {
+    return { kind: 'unscheduled', reason: 'malformed-time', span, place }
   }
 
   // A time with nowhere to put it cannot be placed on a calendar.
@@ -112,7 +141,7 @@ export function classifyMeeting(input: MeetingInput): Meeting {
     return { kind: 'unscheduled', reason: 'tba', span, place }
   }
 
-  return { kind: 'scheduled', days, start, end, span, place }
+  return { kind: 'scheduled', days, start, end: finish, span, place }
 }
 
 /** Splits mixed meetings into the two arrays a Section carries. */

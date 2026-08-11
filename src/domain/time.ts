@@ -19,7 +19,9 @@
 
 import type { TermCode } from './ids.ts'
 
-/** Minutes since midnight, 0..1439. */
+/**
+ * Minutes since midnight, 0..1439 — plus END_OF_DAY, which is only ever an end.
+ */
 export type MinuteOfDay = number & { readonly __brand: 'MinuteOfDay' }
 /** Bit 0 = Sunday .. bit 6 = Saturday. */
 export type DayMask = number & { readonly __brand: 'DayMask' }
@@ -152,6 +154,17 @@ export function timeOverlaps(
   return aStart < bEnd && bStart < aEnd
 }
 
+/**
+ * Midnight at the far end of the day: 1440.
+ *
+ * A class running 09:00 PM to midnight ends here. It cannot be written as 0,
+ * which is the *near* midnight and would make the meeting run backwards, and it
+ * is deliberately not mintable through `minuteOfDay` — the constant is the only
+ * source, so a value of 1440 can only ever have been meant as an end.
+ */
+export const END_OF_DAY = MINUTES_PER_DAY as MinuteOfDay
+
+/** A point in the day, 0..1439. Ends at midnight use END_OF_DAY instead. */
 export function minuteOfDay(value: number): MinuteOfDay {
   if (!Number.isInteger(value) || value < 0 || value >= MINUTES_PER_DAY) {
     throw new Error(`minute of day out of range: ${value}`)
