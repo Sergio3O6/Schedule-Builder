@@ -9,7 +9,7 @@
  */
 
 import { buildExportUrl } from './request.ts'
-import { looksLikeZip } from '../xlsx/workbook.ts'
+import { looksLikeZip, readZipEntries } from '../xlsx/workbook.ts'
 import type { CacheKey, RawCache } from './cache.ts'
 import type { FetchSession } from './session.ts'
 
@@ -27,15 +27,36 @@ export interface FetchResult {
  * classes were found that meet your search criteria." A per-subject crawl should
  * record those and carry on. `not-an-export` is anything else unrecognized.
  */
+export type UnexpectedResponseReason = 'no-classes' | 'not-an-export' | 'incomplete-archive'
+
 export class UnexpectedResponseError extends Error {
-  readonly reason: 'no-classes' | 'not-an-export'
+  readonly reason: UnexpectedResponseReason
   readonly key: CacheKey
 
-  constructor(reason: 'no-classes' | 'not-an-export', key: CacheKey, message: string) {
+  constructor(reason: UnexpectedResponseReason, key: CacheKey, message: string) {
     super(message)
     this.name = 'UnexpectedResponseError'
     this.reason = reason
     this.key = key
+  }
+}
+
+/**
+ * A cached file that is not a readable archive.
+ *
+ * Only reachable from an entry written before the completeness check below
+ * existed, or from something outside this program corrupting the file. It names
+ * the path rather than silently re-fetching: re-fetching would spend a request
+ * on KU to paper over local damage, and if the damage recurred it would do so
+ * every run.
+ */
+export class CorruptCacheError extends Error {
+  readonly path: string
+
+  constructor(path: string, message: string) {
+    super(message)
+    this.name = 'CorruptCacheError'
+    this.path = path
   }
 }
 
@@ -64,9 +85,16 @@ function describeScope(key: CacheKey): string {
  * entry, fails inside the zip parser, and keeps failing until someone deletes
  * the file by hand. Refusing to store it turns a permanent, confusing breakage
  * into one clear error.
+ *
+ * Two distinct wrong answers are possible and they need different words: a body
+ * that was never a spreadsheet, and one that is a spreadsheet we did not receive
+ * all of.
  */
 function assertIsExport(bytes: Uint8Array, key: CacheKey): void {
-  if (looksLikeZip(bytes)) return
+  if (looksLikeZip(bytes)) {
+    assertArchiveIsComplete(bytes, key)
+    return
+  }
 
   const head = new TextDecoder().decode(bytes.subarray(0, MARKER_SEARCH_LIMIT))
   if (head.includes(NO_CLASSES_MARKER)) {
@@ -86,6 +114,34 @@ function assertIsExport(bytes: Uint8Array, key: CacheKey): void {
 }
 
 /**
+ * Rejects an archive that starts like a zip but does not finish like one.
+ *
+ * `looksLikeZip` reads four bytes. A connection that drops mid-transfer still
+ * delivers `PK\x03\x04`, so those four bytes are satisfied by a download of any
+ * length — measured on the real 1.9MB export, a body cut at 50%, 90%, 99% and
+ * even 99.9% all passed. The partial file was then written to the cache, where
+ * it stayed: the read path returns cached bytes without revalidating, so every
+ * later run failed inside the zip parser until someone deleted the file by hand.
+ *
+ * The index a zip needs sits at the END of the file, so parsing it is exactly
+ * the check truncation cannot survive. It costs one inflate of a file we are
+ * about to keep forever, on a script that spends 1.5s between requests.
+ */
+function assertArchiveIsComplete(bytes: Uint8Array, key: CacheKey): void {
+  try {
+    readZipEntries(bytes)
+  } catch (error) {
+    throw new UnexpectedResponseError(
+      'incomplete-archive',
+      key,
+      `Received ${bytes.byteLength} bytes for ${describeScope(key)} that begin like a ` +
+        `spreadsheet but do not parse as one (${(error as Error).message}). The download ` +
+        'was probably cut short. Nothing was cached; rerun to try again.',
+    )
+  }
+}
+
+/**
  * An export's bytes, from disk when possible.
  *
  * Note the ordering: the cache is consulted before the session is touched at
@@ -98,7 +154,23 @@ export async function fetchExport(
   key: CacheKey,
 ): Promise<FetchResult> {
   const cached = await cache.read(key)
-  if (cached !== null) return { bytes: cached, fromCache: true }
+  if (cached !== null) {
+    // Checked on the way out as well as on the way in. The write-side check
+    // stops new damage; this one is how an entry poisoned by an earlier version
+    // gets diagnosed, in one line naming the file, instead of surfacing as a zip
+    // parser error several layers up with no indication of which file to remove.
+    try {
+      readZipEntries(cached)
+    } catch (error) {
+      const path = cache.pathFor(key)
+      throw new CorruptCacheError(
+        path,
+        `Cached export for ${describeScope(key)} is not a readable archive ` +
+          `(${(error as Error).message}). Delete it and rerun:\n  ${path}`,
+      )
+    }
+    return { bytes: cached, fromCache: true }
+  }
 
   const bytes = await session.get(buildExportUrl({ term: key.term, subject: key.subject }))
   assertIsExport(bytes, key)

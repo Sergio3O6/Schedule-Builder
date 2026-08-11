@@ -5,14 +5,28 @@ import { join, resolve } from 'node:path'
 import { RawCache } from './cache.ts'
 import { FetchSession } from './session.ts'
 import type { FetchLike, ResponseLike } from './session.ts'
-import { fetchExport, UnexpectedResponseError } from './fetcher.ts'
+import { CorruptCacheError, fetchExport, UnexpectedResponseError } from './fetcher.ts'
 
 /** The real page KU served for WOLO, a subject with no Fall 2026 classes. */
 const NO_CLASSES_PAGE = resolve(process.cwd(), 'tests/fixtures/no-classes-page.html')
 
-/** A minimal but genuine zip header, so the guard sees a plausible export. */
-const zipBytes = (payload = 'rest of the archive') =>
-  new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new TextEncoder().encode(payload)])
+/**
+ * A real export, used wherever a test needs a good response.
+ *
+ * It used to be four zip header bytes and a string. That was enough for the old
+ * guard and is not enough now, which is the point: an export has to survive
+ * being read, not merely being glanced at.
+ */
+const validExport = new Uint8Array(
+  await readFile(resolve(process.cwd(), 'tests/fixtures/eecs-4269.xlsx')),
+)
+
+/** The 51,236-byte export cut in half — what a dropped connection delivers. */
+const truncatedExport = validExport.subarray(0, Math.floor(validExport.byteLength / 2))
+
+/** Four valid header bytes and nothing that follows them means anything. */
+const zipHeaderOnly = () =>
+  new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new TextEncoder().encode('rest of the archive')])
 
 let root: string
 
@@ -30,7 +44,7 @@ const clock = () => {
 }
 
 /** Counts outbound requests. The count is the point of most of these tests. */
-function countingFetch(status = 200, body: Uint8Array = zipBytes()) {
+function countingFetch(status = 200, body: Uint8Array = validExport) {
   const urls: string[] = []
   const fetch: FetchLike = async (url) => {
     urls.push(url)
@@ -214,7 +228,7 @@ describe('responses that are not exports', () => {
 
     // A later good response is still able to land, because nothing was stored.
     const good = clock()
-    const goodFetch = countingFetch(200, zipBytes())
+    const goodFetch = countingFetch(200, validExport)
     const result = await fetchExport(
       new FetchSession({ fetch: goodFetch.fetch, sleep: good.sleep, now: good.now }),
       cache,
@@ -223,6 +237,93 @@ describe('responses that are not exports', () => {
 
     expect(result.fromCache).toBe(false)
     expect(await cache.has(key)).toBe(true)
+  })
+})
+
+describe('downloads that were cut short', () => {
+  it('refuses a half-received export instead of caching it', async () => {
+    // The defect: looksLikeZip reads four bytes, and a connection that drops
+    // mid-transfer still delivers PK\x03\x04. Measured on the real 1.9MB export,
+    // bodies cut at 50%, 90%, 99% and 99.9% all passed the old guard and were
+    // written to disk, where they stayed.
+    const c = clock()
+    const { fetch } = countingFetch(200, truncatedExport)
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+
+    await fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), cache, key).then(
+      () => expect.unreachable('should have thrown'),
+      (e: unknown) => {
+        expect(e).toBeInstanceOf(UnexpectedResponseError)
+        expect((e as UnexpectedResponseError).reason).toBe('incomplete-archive')
+        expect((e as UnexpectedResponseError).message).toContain('cut short')
+      },
+    )
+
+    expect(await cache.has(key)).toBe(false)
+  })
+
+  it('refuses a zip header with nothing usable behind it', async () => {
+    const c = clock()
+    const { fetch } = countingFetch(200, zipHeaderOnly())
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+
+    await expect(
+      fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), cache, key),
+    ).rejects.toThrow(/do not parse/)
+
+    expect(await cache.has(key)).toBe(false)
+  })
+
+  it('lets a complete export land after a truncated one failed', async () => {
+    const cache = new RawCache(root)
+    const key = { term: '4269' }
+
+    const bad = clock()
+    const badFetch = countingFetch(200, truncatedExport)
+    await expect(
+      fetchExport(
+        new FetchSession({ fetch: badFetch.fetch, sleep: bad.sleep, now: bad.now }),
+        cache,
+        key,
+      ),
+    ).rejects.toThrow(UnexpectedResponseError)
+
+    const good = clock()
+    const goodFetch = countingFetch(200, validExport)
+    const result = await fetchExport(
+      new FetchSession({ fetch: goodFetch.fetch, sleep: good.sleep, now: good.now }),
+      cache,
+      key,
+    )
+
+    expect(result.fromCache).toBe(false)
+    expect(await cache.has(key)).toBe(true)
+  })
+
+  it('names the file to delete when an earlier run already poisoned the cache', async () => {
+    // The other half of the defect: the read path returned cached bytes without
+    // revalidating, so an entry written before this check existed keeps failing
+    // deep inside the zip parser, with nothing saying which file is at fault.
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+    await cache.write(key, truncatedExport)
+
+    const c = clock()
+    const { fetch, urls } = countingFetch()
+
+    await fetchExport(new FetchSession({ fetch, sleep: c.sleep, now: c.now }), cache, key).then(
+      () => expect.unreachable('should have thrown'),
+      (e: unknown) => {
+        expect(e).toBeInstanceOf(CorruptCacheError)
+        expect((e as CorruptCacheError).path).toBe(cache.pathFor(key))
+        expect((e as CorruptCacheError).message).toContain('Delete it and rerun')
+      },
+    )
+
+    // And it did not quietly spend a request on KU to paper over local damage.
+    expect(urls).toEqual([])
   })
 })
 
