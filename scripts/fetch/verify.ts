@@ -19,9 +19,16 @@
  * perfectly good export.
  *
  * The export is sorted by subject and grouped into contiguous blocks (verified:
- * 275 blocks for 275 subjects, in alphabetical order). So a cap that truncates
- * the tail must drop a *suffix* — every missing subject would sort after every
- * present one. Scattered gaps are empty subjects; a clean tail is a cap.
+ * 275 blocks for 275 subjects, in alphabetical order). So a cap stops the file
+ * partway through the alphabet, and the question is HOW FAR THROUGH THE
+ * CATALOGUE the last present subject sits.
+ *
+ * An earlier version asked instead whether every missing subject sorted after
+ * every present one. That predicate is unsound and was measured never to fire:
+ * `AECL` is one of the 17 legitimately empty subjects and sorts near the front,
+ * so a single scattered gap makes it false no matter how much of the tail is
+ * gone. A 9,999-row cap on the real export leaves 156 of 275 subjects, stops at
+ * `MATH`, and still printed `PASS`.
  *
  * Any failure means fall back to the per-subject loop. None of these prove
  * completeness outright — nothing can, without a second source — but each one
@@ -33,7 +40,13 @@ import type { SheetRow } from '../xlsx/workbook.ts'
 /** Column A of KU's export. */
 const SUBJECT_COLUMN = 'A'
 
-/** Totals round enough to be a configured limit rather than a real count. */
+/**
+ * Totals round enough to be a configured limit rather than a real count.
+ *
+ * Checked against the data-row count AND that count plus one, because a cap
+ * upstream may or may not count the header row it emits. A limit of 10,000 that
+ * includes the header leaves 9,999 data rows here, which is not round at all.
+ */
 const SUSPICIOUS_TOTALS: readonly number[] = [1000, 5000, 10000, 20000, 50000]
 
 /** A subject we know is populated, used as a floor. Verified: EECS is 423 rows. */
@@ -51,6 +64,35 @@ const FLOOR_ROWS = 400
  */
 const MIN_PRESENT_RATIO = 0.5
 
+/**
+ * How far through the sorted catalogue the last present subject must sit.
+ *
+ * Measured on the real Fall 2026 export: the last present code is `WGSS` at
+ * index 290 of 292, or 0.997 — only `WOLO` sorts after it. Truncation moves this
+ * number a long way: a 9,999-row cap stops at `MATH` (0.572), 15,000 stops at
+ * `SGRY` (0.870), 16,000 at `SW` (0.914).
+ *
+ * 0.95 leaves 15 trailing codes free to be legitimately empty, against the 17
+ * empty codes seen live of which exactly one is at the tail. Being generous here
+ * is deliberate — a false "truncated" costs 292 requests to KU.
+ *
+ * The limit is worth stating plainly: a cap that removes only the last percent
+ * or two of the file (17,000 rows leaves 0.983) is invisible to this test, and
+ * to every other test in this module. Nothing short of a second source can see
+ * it.
+ */
+const MIN_TAIL_COVERAGE = 0.95
+
+/**
+ * The shortest absent tail that can mean anything.
+ *
+ * A short expected list cannot express a tail at all: one empty subject at the
+ * end of a five-code list is 0.8 coverage, which would read as a cap. Requiring
+ * two absent codes keeps that case honest without weakening the real catalogue,
+ * where the ratio above needs 15 before it fires.
+ */
+const MIN_TRUNCATED_TAIL = 2
+
 export interface CoverageReport {
   readonly totalRows: number
   readonly rowsBySubject: ReadonlyMap<string, number>
@@ -64,9 +106,16 @@ export interface CoverageReport {
   readonly lastPresentSubject: string | null
   readonly firstMissingSubject: string | null
   /**
-   * True when every missing subject sorts after every present one — the shape a
-   * tail-truncating result cap produces, and the shape scattered empty subjects
-   * cannot produce.
+   * Share of the sorted expected catalogue up to and including the last present
+   * subject. 0.997 live; a result cap drops it sharply. 0 when nothing came back.
+   */
+  readonly tailCoverage: number
+  /** Expected subjects sorting after the last present one. 1 live (`WOLO`). */
+  readonly absentTailLength: number
+  /**
+   * True when the catalogue stops well short of the end of the alphabet — the
+   * shape a tail-truncating result cap produces. Scattered empty subjects do not
+   * move `tailCoverage`, so they do not trip this.
    */
   readonly looksTruncated: boolean
   /** Share of expected subjects that appear at all. Verified 0.94 for Fall 2026. */
@@ -115,12 +164,13 @@ export function assessCoverage(
   const lastPresentSubject = presentExpected.at(-1) ?? null
   const firstMissingSubject = missingSubjects[0] ?? null
 
-  // Truncation drops a suffix. If anything is missing but nothing came back at
-  // all, that is the degenerate case of the same thing.
-  const looksTruncated =
-    missingSubjects.length > 0 &&
-    (lastPresentSubject === null ||
-      (firstMissingSubject !== null && firstMissingSubject > lastPresentSubject))
+  // How far into the alphabet the file gets before it stops. Nothing present is
+  // the degenerate case: coverage 0, the whole catalogue absent from the tail.
+  const reached = lastPresentSubject === null ? 0 : sortedExpected.indexOf(lastPresentSubject) + 1
+  const absentTailLength = sortedExpected.length - reached
+  const tailCoverage = sortedExpected.length === 0 ? 1 : reached / sortedExpected.length
+
+  const looksTruncated = absentTailLength >= MIN_TRUNCATED_TAIL && tailCoverage < MIN_TAIL_COVERAGE
 
   return {
     totalRows: dataRows.length,
@@ -129,10 +179,14 @@ export function assessCoverage(
     unexpectedSubjects: [...rowsBySubject.keys()].filter((s) => !expectedSet.has(s)).sort(),
     lastPresentSubject,
     firstMissingSubject,
+    tailCoverage,
+    absentTailLength,
     looksTruncated,
     presentSubjectRatio:
       sortedExpected.length === 0 ? 1 : presentExpected.length / sortedExpected.length,
-    suspiciouslyRoundTotal: SUSPICIOUS_TOTALS.includes(dataRows.length),
+    suspiciouslyRoundTotal:
+      SUSPICIOUS_TOTALS.includes(dataRows.length) ||
+      SUSPICIOUS_TOTALS.includes(dataRows.length + 1),
     floorSubject: FLOOR_SUBJECT,
     floorSubjectRows: rowsBySubject.get(FLOOR_SUBJECT) ?? 0,
   }
@@ -158,13 +212,22 @@ export function describeCoverage(report: CoverageReport): string {
     const shown = report.missingSubjects.slice(0, 10).join(', ')
     const more =
       report.missingSubjects.length > 10 ? ` (+${report.missingSubjects.length - 10} more)` : ''
-    const verdict = report.looksTruncated
-      ? 'FAIL: they form an unbroken alphabetical tail, which is what a result cap looks like'
-      : 'ok: scattered through the alphabet, consistent with subjects offering no classes this term'
-    lines.push(`${report.missingSubjects.length} subjects absent (${shown}${more}) — ${verdict}.`)
+    lines.push(`${report.missingSubjects.length} subjects absent (${shown}${more}).`)
   }
-  if (report.looksTruncated && report.missingSubjects.length === 0) {
-    lines.push('FAIL: nothing came back at all.')
+
+  if (report.lastPresentSubject === null) {
+    lines.push('FAIL: not one expected subject came back.')
+  } else if (report.looksTruncated) {
+    lines.push(
+      `FAIL: the catalogue stops at ${report.lastPresentSubject}, ` +
+        `${(report.tailCoverage * 100).toFixed(1)}% of the way through the subject list, with ` +
+        `${report.absentTailLength} codes after it — which is what a result cap looks like.`,
+    )
+  } else if (report.missingSubjects.length > 0) {
+    lines.push(
+      'ok: the absences are scattered through the alphabet rather than piled at the end, ' +
+        'consistent with subjects offering no classes this term.',
+    )
   }
   if (report.presentSubjectRatio < MIN_PRESENT_RATIO) {
     const percent = (report.presentSubjectRatio * 100).toFixed(1)
