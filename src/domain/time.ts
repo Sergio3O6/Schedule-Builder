@@ -25,6 +25,8 @@ export type MinuteOfDay = number & { readonly __brand: 'MinuteOfDay' }
 export type DayMask = number & { readonly __brand: 'DayMask' }
 /** Whole days since the term epoch. May be negative for pre-term sessions. */
 export type DayOffset = number & { readonly __brand: 'DayOffset' }
+/** A date in exactly `YYYY-MM-DD`, the only shape `Date.parse` reads as UTC. */
+export type IsoDate = string & { readonly __brand: 'IsoDate' }
 
 export interface DateSpan {
   readonly startDay: DayOffset
@@ -34,13 +36,21 @@ export interface DateSpan {
 
 /**
  * The term epoch. Pinned once per term and stored in the bundle index.
+ *
+ * The dates are branded, so this cannot be written as an object literal — it has
+ * to come from `termCalendar()`. That is the whole point. An epoch of
+ * '2026-08-24T00:00:00Z', or '2026/08/24', or one with a trailing space, parses
+ * to NaN; the NaN flows into every DayOffset, `NaN < NaN` is false so the
+ * inverted-span assert below never fires, and `spansOverlap` then answers false
+ * for every pair of meetings in the term. Two identical 9am MWF lectures stop
+ * conflicting and nothing anywhere throws.
  */
 export interface TermCalendar {
   readonly term: TermCode
-  /** ISO date, the term's modal Begin date. */
-  readonly startDate: string
-  /** ISO date, the term's modal End date. */
-  readonly endDate: string
+  /** The term's modal Begin date. */
+  readonly startDate: IsoDate
+  /** The term's modal End date. */
+  readonly endDate: IsoDate
 }
 
 const MINUTES_PER_DAY = 1440
@@ -180,10 +190,53 @@ function parseMonthDay(raw: string): MonthDay {
   return { month, day: Number(match[2]) }
 }
 
-const iso = (year: number, month: number, day: number): string =>
-  `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+const iso = (year: number, month: number, day: number): IsoDate =>
+  isoDate(`${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`)
 
-const utcMs = (isoDate: string): number => Date.parse(`${isoDate}T00:00:00Z`)
+const utcMs = (date: IsoDate): number => Date.parse(`${date}T00:00:00Z`)
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * The only way to mint an IsoDate. Checks the shape, then checks that the shape
+ * actually parses.
+ *
+ * Both halves are load-bearing. `Date.parse` reads a bare `YYYY-MM-DD` as UTC
+ * midnight but reads '2026/08/24' or a leading space as LOCAL time, which is a
+ * silent hour of drift; and it returns NaN for anything with a time component
+ * appended, which is worse, because NaN propagates without complaint.
+ *
+ * What this does NOT yet check is whether the day exists: `2026-09-31` parses
+ * cheerfully as October 1st. That is a real defect and it is fixed separately,
+ * where the MMM-DD parser that produces such a date is also fixed.
+ */
+export function isoDate(raw: string): IsoDate {
+  if (!ISO_DATE_PATTERN.test(raw)) {
+    throw new Error(`not an ISO date (expected YYYY-MM-DD): ${JSON.stringify(raw)}`)
+  }
+  const date = raw as IsoDate
+  if (Number.isNaN(utcMs(date))) {
+    throw new Error(`ISO date does not exist: ${JSON.stringify(raw)}`)
+  }
+  return date
+}
+
+/**
+ * Mints a validated term epoch.
+ *
+ * Everything downstream of this — every DayOffset, every partial-term overlap —
+ * is measured from `startDate`, and an epoch that fails to parse breaks all of
+ * it silently rather than loudly. So the epoch is validated once, here, at the
+ * one moment where a person could still be told what is wrong.
+ */
+export function termCalendar(term: TermCode, startDate: string, endDate: string): TermCalendar {
+  const start = isoDate(startDate)
+  const end = isoDate(endDate)
+  if (utcMs(end) < utcMs(start)) {
+    throw new Error(`term ends before it starts: ${start}..${end}`)
+  }
+  return { term, startDate: start, endDate: end }
+}
 
 /**
  * Reconstructs the calendar year for a begin date.
@@ -194,7 +247,7 @@ const utcMs = (isoDate: string): number => Date.parse(`${isoDate}T00:00:00Z`)
  * same AUG-13 under a Spring 2027 term resolves to 2026 as well, because that is
  * the August adjacent to a January start.
  */
-function yearNearestTermStart(md: MonthDay, calendarStart: string): number {
+function yearNearestTermStart(md: MonthDay, calendarStart: IsoDate): number {
   const anchor = utcMs(calendarStart)
   const base = Number(calendarStart.slice(0, 4))
 
@@ -224,7 +277,7 @@ export function parseDateRange(
   calendar: TermCalendar,
   begin: string,
   end: string,
-): { readonly startDate: string; readonly endDate: string } {
+): { readonly startDate: IsoDate; readonly endDate: IsoDate } {
   // 25 live rows carry no dates at all — always both fields, never one, and
   // always sections that are unscheduled anyway (APPT, no meeting days). The
   // section still belongs to the term, so the term's own span is the honest
@@ -257,10 +310,17 @@ export function parseDateRange(
  * The single place a calendar date becomes a DayOffset. Imported by both the
  * normalizer and the client so the two cannot drift.
  */
-export function toDayOffset(calendar: TermCalendar, isoDate: string): DayOffset {
-  const ms = utcMs(isoDate)
-  if (Number.isNaN(ms)) throw new Error(`unparseable ISO date: ${JSON.stringify(isoDate)}`)
-  return Math.round((ms - utcMs(calendar.startDate)) / MS_PER_DAY) as DayOffset
+export function toDayOffset(calendar: TermCalendar, date: IsoDate): DayOffset {
+  const epoch = utcMs(calendar.startDate)
+  // Belt and braces over the brand: a cast can still smuggle an unvalidated
+  // epoch in here, and this is the one error worth paying a comparison to catch,
+  // because its symptom is every conflict check quietly answering "no clash".
+  if (Number.isNaN(epoch)) {
+    throw new Error(`term epoch is not a parseable date: ${JSON.stringify(calendar.startDate)}`)
+  }
+  const ms = utcMs(date)
+  if (Number.isNaN(ms)) throw new Error(`unparseable ISO date: ${JSON.stringify(date)}`)
+  return Math.round((ms - epoch) / MS_PER_DAY) as DayOffset
 }
 
 export function dateSpan(calendar: TermCalendar, begin: string, end: string): DateSpan {

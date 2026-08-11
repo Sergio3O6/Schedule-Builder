@@ -3,11 +3,13 @@ import { termCode } from './ids.ts'
 import {
   dateSpan,
   dayMaskOverlaps,
+  isoDate,
   minuteOfDay,
   parseClockTime,
   parseDateRange,
   parseDayMask,
   spansOverlap,
+  termCalendar,
   termYear,
   timeOverlaps,
   toDayOffset,
@@ -15,11 +17,7 @@ import {
 import type { TermCalendar } from './time.ts'
 
 /** Fall 2026, the modal span of the live export. */
-const fall2026: TermCalendar = {
-  term: termCode('4269'),
-  startDate: '2026-08-24',
-  endDate: '2026-12-18',
-}
+const fall2026 = termCalendar(termCode('4269'), '2026-08-24', '2026-12-18')
 
 describe('parseDayMask', () => {
   it('reads the two-letter tokens before the single letters', () => {
@@ -165,11 +163,7 @@ describe('parseDateRange', () => {
   it('anchors an August start to the previous year under a spring term', () => {
     // A full-year course listed under Spring 2027 begins in the August adjacent
     // to a January start, not eight months after it.
-    const spring2027: TermCalendar = {
-      term: termCode('4272'),
-      startDate: '2027-01-19',
-      endDate: '2027-05-14',
-    }
+    const spring2027 = termCalendar(termCode('4272'), '2027-01-19', '2027-05-14')
     expect(parseDateRange(spring2027, 'AUG-13', 'MAY-26')).toEqual({
       startDate: '2026-08-13',
       endDate: '2027-05-26',
@@ -203,26 +197,87 @@ describe('parseDateRange', () => {
   })
 })
 
+describe('termCalendar', () => {
+  it('mints the pinned Fall 2026 epoch', () => {
+    const cal = termCalendar(termCode('4269'), '2026-08-24', '2026-12-18')
+    expect(cal.startDate).toBe('2026-08-24')
+    expect(cal.endDate).toBe('2026-12-18')
+  })
+
+  it('rejects every epoch Date.parse will not read as UTC midnight', () => {
+    // The whole defect in one list. Each of these produced NaN or an hour of
+    // local-time drift, silently, from a field typed as a plain string.
+    for (const bad of ['2026-08-24T00:00:00Z', '2026/08/24', ' 2026-08-24', '2026-8-24', '', 'AUG-24']) {
+      expect(() => termCalendar(termCode('4269'), bad, '2026-12-18'), bad).toThrow(
+        /not an ISO date/,
+      )
+    }
+  })
+
+  it('validates the end date, not only the start', () => {
+    expect(() => termCalendar(termCode('4269'), '2026-08-24', '2026-12-18 ')).toThrow(
+      /not an ISO date/,
+    )
+  })
+
+  it('rejects a date whose month does not exist', () => {
+    expect(() => isoDate('2026-13-01')).toThrow(/does not exist/)
+    expect(() => isoDate('2026-00-15')).toThrow(/does not exist/)
+  })
+
+  it('rejects a term that ends before it starts', () => {
+    expect(() => termCalendar(termCode('4269'), '2026-12-18', '2026-08-24')).toThrow(
+      /ends before it starts/,
+    )
+  })
+
+  it('allows a single-day term rather than requiring a strict order', () => {
+    expect(() => termCalendar(termCode('4269'), '2026-08-24', '2026-08-24')).not.toThrow()
+  })
+})
+
 describe('toDayOffset', () => {
   it('puts the term start at zero', () => {
-    expect(toDayOffset(fall2026, '2026-08-24')).toBe(0)
+    expect(toDayOffset(fall2026, isoDate('2026-08-24'))).toBe(0)
   })
 
   it('counts whole days forward', () => {
-    expect(toDayOffset(fall2026, '2026-08-25')).toBe(1)
-    expect(toDayOffset(fall2026, '2026-12-18')).toBe(116)
+    expect(toDayOffset(fall2026, isoDate('2026-08-25'))).toBe(1)
+    expect(toDayOffset(fall2026, isoDate('2026-12-18'))).toBe(116)
   })
 
   it('goes negative before the term starts', () => {
-    expect(toDayOffset(fall2026, '2026-08-13')).toBe(-11)
+    expect(toDayOffset(fall2026, isoDate('2026-08-13'))).toBe(-11)
   })
 
   it('is unaffected by daylight saving, which falls inside the term', () => {
     // US DST ends 2026-11-01. A naive local-time implementation drifts an hour
     // here and rounds to the wrong day.
-    const before = toDayOffset(fall2026, '2026-10-31')
-    const after = toDayOffset(fall2026, '2026-11-02')
+    const before = toDayOffset(fall2026, isoDate('2026-10-31'))
+    const after = toDayOffset(fall2026, isoDate('2026-11-02'))
     expect(after - before).toBe(2)
+  })
+
+  it('throws on an unparseable epoch instead of returning NaN', () => {
+    // The failure in full, if this ever gets past the brand by a cast: every
+    // DayOffset becomes NaN; dateSpan's inversion assert stays silent because
+    // NaN < NaN is false; spansOverlap then answers false for every pair, so
+    // two identical 9am MWF lectures do not conflict — and nothing throws.
+    const smuggled = {
+      term: termCode('4269'),
+      startDate: '2026-08-24T00:00:00Z',
+      endDate: '2026-12-18',
+    } as unknown as TermCalendar
+
+    expect(() => toDayOffset(smuggled, isoDate('2026-09-01'))).toThrow(/term epoch/)
+    expect(() => dateSpan(smuggled, 'AUG-24', 'DEC-18')).toThrow(/term epoch/)
+  })
+
+  it('produces finite offsets for the real term, which is what NaN would break', () => {
+    const span = dateSpan(fall2026, 'AUG-24', 'DEC-18')
+    expect(Number.isFinite(span.startDay)).toBe(true)
+    expect(Number.isFinite(span.endDay)).toBe(true)
+    expect(spansOverlap(span, span)).toBe(true)
   })
 })
 

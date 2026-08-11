@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { termCode } from './ids.ts'
-import { dateSpan, parseClockTime, parseDayMask } from './time.ts'
-import type { TermCalendar } from './time.ts'
+import { dateSpan, parseClockTime, parseDayMask, termCalendar } from './time.ts'
 import {
   anyMeetingConflicts,
   classifyMeeting,
@@ -10,11 +9,7 @@ import {
 } from './meeting.ts'
 import type { ScheduledMeeting } from './meeting.ts'
 
-const fall2026: TermCalendar = {
-  term: termCode('4269'),
-  startDate: '2026-08-24',
-  endDate: '2026-12-18',
-}
+const fall2026 = termCalendar(termCode('4269'), '2026-08-24', '2026-12-18')
 
 const LAWRENCE = { campus: 'LAWRENCE', room: null }
 
