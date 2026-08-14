@@ -35,6 +35,17 @@ const ZIP64_U16 = 0xffff
 const ZIP64_U32 = 0xffffffff
 
 /**
+ * Ceiling on what one member may inflate to.
+ *
+ * Measured: the whole-term sheet is 18.2MB inflated from a 1.9MB archive, a
+ * ratio of about ten. This leaves seven times that headroom, so it cannot fire
+ * on a real export, and it turns the pathological case — a small archive
+ * engineered to inflate to hundreds of megabytes — into an error naming the
+ * member rather than a process dying of memory exhaustion.
+ */
+const MAX_MEMBER_BYTES = 128 * 1024 * 1024
+
+/**
  * Cheap check that bytes are plausibly a zip, and therefore plausibly an xlsx.
  *
  * Exists so callers can reject a wrong response *before* storing it. KU answers
@@ -68,6 +79,13 @@ export function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     throw new Error('zip64 archives are not supported (KU exports are far below the limit)')
   }
 
+  // Zero entries is the one count that never gets validated by the loop below,
+  // because the loop does not run. Four bytes of trailing data reading
+  // PK\x05\x06 followed by zeros is a well-formed record describing an empty
+  // archive, and it used to be accepted — surfacing much later as the
+  // misleading "workbook contains no worksheet". An xlsx always has members.
+  if (totalEntries === 0) throw new Error('zip archive declares no members')
+
   const entries = new Map<string, Uint8Array>()
   let cursor = centralDirOffset
 
@@ -86,9 +104,17 @@ export function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     const commentLength = view.getUint16(cursor + 32, true)
     const localHeaderOffset = view.getUint32(cursor + 42, true)
 
-    const name = new TextDecoder().decode(
-      bytes.subarray(cursor + CENTRAL_DIR_ENTRY_MIN_SIZE, cursor + CENTRAL_DIR_ENTRY_MIN_SIZE + nameLength),
-    )
+    const nameStart = cursor + CENTRAL_DIR_ENTRY_MIN_SIZE
+    if (nameStart + nameLength > bytes.byteLength) {
+      throw new Error(`truncated member name at central directory entry ${i}`)
+    }
+    const name = new TextDecoder().decode(bytes.subarray(nameStart, nameStart + nameLength))
+
+    // Names are unique in any archive a writer produces on purpose. A duplicate
+    // would silently overwrite, and the last one would win — which is exactly
+    // how a second xl/worksheets/sheet1.xml would slip past the single-sheet
+    // check in readWorkbook and be read instead of the real one.
+    if (entries.has(name)) throw new Error(`duplicate zip member: ${name}`)
 
     entries.set(name, readMember(bytes, view, localHeaderOffset, method, compressedSize, name))
     cursor += CENTRAL_DIR_ENTRY_MIN_SIZE + nameLength + extraLength + commentLength
@@ -101,7 +127,16 @@ function findEndOfCentralDirectory(view: DataView, length: number): number {
   // Scan backwards: the record sits at the very end unless a zip comment follows.
   const earliest = Math.max(0, length - EOCD_MIN_SIZE - 0xffff)
   for (let i = length - EOCD_MIN_SIZE; i >= earliest; i -= 1) {
-    if (view.getUint32(i, true) === EOCD_SIGNATURE) return i
+    if (view.getUint32(i, true) !== EOCD_SIGNATURE) continue
+
+    // The signature alone is four bytes and can occur in ordinary data. A real
+    // record ends the file exactly: its own 22 bytes plus the comment it
+    // declares. Without this test, trailing bytes that happen to contain
+    // PK\x05\x06 are read as an archive of zero entries — no error, just an
+    // empty result that surfaces later as the misleading "contains no
+    // worksheet".
+    const commentLength = view.getUint16(i + 20, true)
+    if (i + EOCD_MIN_SIZE + commentLength === length) return i
   }
   throw new Error('not a zip archive: no end-of-central-directory record found')
 }
@@ -126,10 +161,24 @@ function readMember(
   const nameLength = view.getUint16(offset + 26, true)
   const extraLength = view.getUint16(offset + 28, true)
   const start = offset + LOCAL_HEADER_MIN_SIZE + nameLength + extraLength
+
+  // subarray CLAMPS rather than throwing, so a declared size that runs past the
+  // end of the file yields a short buffer with no complaint. For a DEFLATED
+  // member inflate then fails loudly, but a STORED one would be returned as-is:
+  // silently short, or silently containing the central directory that follows
+  // it. Checking the declared extent is the only place this can be caught.
+  if (start + compressedSize > bytes.byteLength) {
+    throw new Error(
+      `member ${name} declares ${compressedSize} bytes at ${start}, past the end of ` +
+        `the ${bytes.byteLength}-byte archive`,
+    )
+  }
   const payload = bytes.subarray(start, start + compressedSize)
 
   if (method === STORED) return payload
-  if (method === DEFLATED) return new Uint8Array(inflateRawSync(payload))
+  if (method === DEFLATED) {
+    return new Uint8Array(inflateRawSync(payload, { maxOutputLength: MAX_MEMBER_BYTES }))
+  }
   throw new Error(`unsupported compression method ${method} for ${name}`)
 }
 

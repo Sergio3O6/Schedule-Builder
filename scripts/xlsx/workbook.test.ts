@@ -139,6 +139,57 @@ describe('readZipEntries', () => {
   })
 })
 
+describe('readZipEntries — archives that are wrong rather than absent', () => {
+  it('refuses two members with the same name instead of keeping the last', () => {
+    // Map.set overwrites in silence. Two members named xl/worksheets/sheet1.xml
+    // would sail past readWorkbook's single-sheet check and the second would be
+    // read as the data — the quietest possible way to read the wrong numbers.
+    const zip = buildZip([
+      { name: 'xl/worksheets/sheet1.xml', data: new TextEncoder().encode('<real/>') },
+      { name: 'xl/worksheets/sheet1.xml', data: new TextEncoder().encode('<decoy/>') },
+    ])
+    expect(() => readZipEntries(zip)).toThrow(/duplicate zip member/)
+  })
+
+  it('refuses an archive that declares no members', () => {
+    // Four bytes reading PK\x05\x06 and eighteen zeros is a well-formed record
+    // for an empty archive. It used to be accepted and surfaced much later as
+    // "workbook contains no worksheet", which points at the wrong problem.
+    const emptyEocd = new Uint8Array(22)
+    new DataView(emptyEocd.buffer).setUint32(0, 0x06054b50, true)
+    expect(() => readZipEntries(emptyEocd)).toThrow(/declares no members/)
+  })
+
+  it('refuses trailing bytes after the end-of-central-directory record', () => {
+    // The signature is four bytes and occurs in ordinary data. A real record
+    // ends the file exactly: its 22 bytes plus the comment length it declares.
+    const zip = buildZip([{ name: 'a.txt', data: new TextEncoder().encode('hello') }])
+    const withJunk = new Uint8Array(zip.byteLength + 8)
+    withJunk.set(zip, 0)
+    withJunk.set(new TextEncoder().encode('trailing'), zip.byteLength)
+
+    expect(() => readZipEntries(withJunk)).toThrow(/not a zip archive/)
+  })
+
+  it('refuses a stored member that declares more bytes than the archive holds', () => {
+    // subarray clamps rather than throwing, so this used to be returned as a
+    // short buffer — or one containing the central directory that follows it —
+    // with nothing reporting a problem. DEFLATED members fail loudly inside
+    // inflate; STORED ones had no check at all.
+    const zip = buildZip([
+      { name: 'a.txt', data: new TextEncoder().encode('hello'), store: true, declaredSize: 5000 },
+    ])
+    expect(() => readZipEntries(zip)).toThrow(/past the end of the/)
+  })
+
+  it('still reads the real KU export unchanged', async () => {
+    // All of the above is worthless if it rejects the one file that matters.
+    const entries = readZipEntries(await eecs())
+    expect(entries.size).toBe(9)
+    expect(entries.get('xl/worksheets/sheet1.xml')?.byteLength).toBeGreaterThan(400_000)
+  })
+})
+
 describe('readWorkbook against the real KU export', () => {
   it('reads the header row exactly as KU emits it', async () => {
     const rows = await readWorkbook(await eecs())
@@ -185,9 +236,20 @@ describe('readWorkbook against the real KU export', () => {
   })
 })
 
-/** Minimal zip writer, for cases KU's own file cannot demonstrate. */
+/**
+ * Minimal zip writer, for cases KU's own file cannot demonstrate.
+ *
+ * `declaredSize` writes a compressed size the payload does not have, which is
+ * what a corrupted or hostile archive looks like from the index.
+ */
 function buildZip(
-  files: { name: string; data: Uint8Array; store?: boolean; method?: number }[],
+  files: {
+    name: string
+    data: Uint8Array
+    store?: boolean
+    method?: number
+    declaredSize?: number
+  }[],
 ): Uint8Array {
   const chunks: Uint8Array[] = []
   const central: Uint8Array[] = []
@@ -196,13 +258,14 @@ function buildZip(
   for (const file of files) {
     const method = file.method ?? (file.store ? 0 : 8)
     const payload = method === 8 ? new Uint8Array(deflateRawSync(file.data)) : file.data
+    const declared = file.declaredSize ?? payload.length
     const name = new TextEncoder().encode(file.name)
 
     const local = new Uint8Array(30 + name.length)
     const lv = new DataView(local.buffer)
     lv.setUint32(0, 0x04034b50, true)
     lv.setUint16(8, method, true)
-    lv.setUint32(18, payload.length, true)
+    lv.setUint32(18, declared, true)
     lv.setUint32(22, file.data.length, true)
     lv.setUint16(26, name.length, true)
     local.set(name, 30)
@@ -211,7 +274,7 @@ function buildZip(
     const cv = new DataView(entry.buffer)
     cv.setUint32(0, 0x02014b50, true)
     cv.setUint16(10, method, true)
-    cv.setUint32(20, payload.length, true)
+    cv.setUint32(20, declared, true)
     cv.setUint32(24, file.data.length, true)
     cv.setUint16(28, name.length, true)
     cv.setUint32(42, offset, true)
