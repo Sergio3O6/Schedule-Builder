@@ -157,6 +157,54 @@ describe('atomicity', () => {
     expect((await readdir(join(root, '4269'))).filter((f) => f.endsWith('.tmp'))).toEqual([])
   })
 
+  it('never blends concurrent writes of the same key into one file', async () => {
+    // The temp name used to be ${target}.${pid}.tmp — per process, not per
+    // write — so writes of one key shared a path and interleaved into it.
+    // Measured with four 4MB payloads: all four writes reported SUCCESS and the
+    // published file was a blend of several of them. Every caller was told it
+    // worked, and the result passes any check short of reading the bytes.
+    //
+    // Unique names do not prevent the collision; on Windows a concurrent rename
+    // onto a live target fails EPERM outright. What they change is the failure
+    // from a corrupt file nobody hears about to a loud one.
+    //
+    // The payloads are large on purpose. Below about a megabyte a single write
+    // usually lands whole and the blend does not reproduce.
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+    const size = 4 * 1024 * 1024
+    const payloads = Array.from({ length: 4 }, (_, i) => new Uint8Array(size).fill(i + 1))
+
+    const results = await Promise.allSettled(payloads.map((bytes) => cache.write(key, bytes)))
+    expect(results.some((r) => r.status === 'fulfilled')).toBe(true)
+
+    const stored = await cache.read(key)
+    expect(stored).not.toBeNull()
+    // Exactly one payload, start to finish. A blend fails the uniformity check.
+    const first = stored?.[0]
+    expect(payloads.some((p) => p[0] === first)).toBe(true)
+    expect(stored?.every((b) => b === first)).toBe(true)
+    expect(stored?.byteLength).toBe(size)
+  })
+
+  it('keeps concurrent writes of different keys entirely apart', async () => {
+    // What the per-subject fallback loop actually does, if it is ever needed.
+    const cache = new RawCache(root)
+    const subjects = ['EECS', 'BIOL', 'MATH', 'C&PE', 'LA&S']
+
+    await Promise.all(
+      subjects.map((subject, i) =>
+        cache.write({ term: '4269', subject }, new Uint8Array(256).fill(i + 1)),
+      ),
+    )
+
+    for (const [i, subject] of subjects.entries()) {
+      const stored = await cache.read({ term: '4269', subject })
+      expect(stored?.every((b) => b === i + 1), subject).toBe(true)
+    }
+    expect((await readdir(join(root, '4269'))).filter((f) => f.endsWith('.tmp'))).toEqual([])
+  })
+
   it('replaces an existing entry wholesale', async () => {
     const cache = new RawCache(root)
     const key = { term: '4269', subject: 'EECS' }

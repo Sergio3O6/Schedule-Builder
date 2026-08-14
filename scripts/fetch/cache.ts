@@ -9,6 +9,7 @@
  * This directory is gitignored — regenerable, and large.
  */
 
+import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -111,12 +112,24 @@ export class RawCache {
    * sees a file, skips the subject, and the dataset is silently missing rows with
    * nothing anywhere reporting a problem. Rename is the cheapest way to make a
    * half-written file unobservable.
+   *
+   * A Ctrl-C between the write and the rename does leave a .tmp behind, and
+   * nothing sweeps it. That is deliberate: a temp file is never read — lookups
+   * use the exact target path — so a leftover costs disk and nothing else,
+   * whereas a sweep is a routine that deletes files another run may be in the
+   * middle of writing.
    */
   async write(key: CacheKey, bytes: Uint8Array): Promise<void> {
     const target = this.pathFor(key)
     await mkdir(dirname(target), { recursive: true })
 
-    const temp = `${target}.${process.pid}.tmp`
+    // Unique per WRITE, not per process. The pid alone gave two concurrent
+    // writes of the same key one shared path: they interleave into it, one
+    // rename wins, the other fails ENOENT, and its error handler unlinks a temp
+    // file that by then belongs to somebody else. Nothing reaches that today
+    // because the session serializes every request, but the per-subject
+    // fallback is precisely a loop that would.
+    const temp = `${target}.${process.pid}.${randomUUID()}.tmp`
     try {
       await writeFile(temp, bytes)
       await rename(temp, target)
