@@ -8,6 +8,7 @@ import {
   termCode,
   unitId,
 } from './ids.ts'
+import type { CourseKey } from './ids.ts'
 
 describe('termCode', () => {
   it('accepts the live term codes', () => {
@@ -55,6 +56,36 @@ describe('courseKey', () => {
   it('rejects an empty number', () => {
     expect(() => courseKey('EECS', '   ')).toThrow(/course number is empty/)
   })
+
+  it('accepts the non-numeric course numbers the export really contains', () => {
+    // Measured across 17,338 rows: 799 distinct values, longest 4 characters,
+    // digits plus W, X and Y. 1W/5W/7W are workshops, XXXX/YYYY belong to FRSP.
+    for (const number of [' 1W', ' 5W', ' XXXX', ' YYYY', ' 002', ' 6']) {
+      expect(() => courseKey('EECS', number), number).not.toThrow()
+    }
+  })
+
+  it('validates the number half, not only the subject', () => {
+    // 'EECS|../../etc/passwd' used to be a perfectly constructible CourseKey,
+    // and a number containing '|' splits back into the wrong two pieces.
+    for (const bad of ['../../etc/passwd', 'A|B', '138 ext', 'eecs', 'TOOLONGNUMBER']) {
+      expect(() => courseKey('EECS', bad), bad).toThrow(/malformed course number/)
+    }
+  })
+})
+
+describe('splitCourseKey', () => {
+  it('refuses a key with no separator instead of answering nonsense', () => {
+    // indexOf gives −1 and slice(0, −1) drops the last character, so this
+    // answered { subject: 'EECS13', number: 'EECS138' } — a subject that does
+    // not exist, reported with total confidence. Only a cast can get here, and
+    // a cast is exactly what the type system cannot stop.
+    expect(() => splitCourseKey('EECS138' as CourseKey)).toThrow(/not a course key/)
+  })
+
+  it('refuses a key whose subject half is not a subject', () => {
+    expect(() => splitCourseKey('eecs|138' as CourseKey)).toThrow(/malformed subject code/)
+  })
 })
 
 describe('classNbr', () => {
@@ -77,6 +108,19 @@ describe('classNbr', () => {
       expect(() => classNbr(bad), bad).toThrow()
     }
   })
+
+  it('rejects notations Number() would quietly accept', () => {
+    // Each of these came back as a plausible integer: '0x4B6A' as 19306, '1e4'
+    // as 10000, '' as 0, and Infinity as a finite-looking failure downstream.
+    for (const bad of ['0x4B6A', '1e4', 'Infinity', '  ', '1_000', '+ 5']) {
+      expect(() => classNbr(bad), bad).toThrow(/not a decimal number/)
+    }
+  })
+
+  it('rejects a value too large to survive the round trip', () => {
+    // Past 2^53 the number read back is not the number sent.
+    expect(() => classNbr('99999999999999999999')).toThrow(/too large/)
+  })
 })
 
 describe('combSectId', () => {
@@ -95,6 +139,13 @@ describe('combSectId', () => {
   it('treats blank as absent', () => {
     expect(combSectId('')).toBeNull()
     expect(combSectId('   ')).toBeNull()
+  })
+
+  it('rejects a negative id, as classNbr does', () => {
+    // These two columns sit side by side and this module exists to keep them
+    // straight; one of them quietly accepting −5 undoes that.
+    expect(() => combSectId('-5')).toThrow(/must be positive/)
+    expect(() => combSectId('-5.0')).toThrow(/must be positive/)
   })
 })
 

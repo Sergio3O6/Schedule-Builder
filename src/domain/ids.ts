@@ -28,14 +28,32 @@ export type CombSectId = Brand<number, 'CombSectId'>
 export type UnitId = Brand<string, 'UnitId'>
 
 /**
+ * Plain decimal, which is the only shape this data ever takes.
+ *
+ * Number() accepts a great deal more than that, and silently: '0x4B6A' becomes
+ * 19306, '1e4' becomes 10000, '' becomes 0, and 'Infinity' parses. None can be
+ * a real class number, and each would arrive as a plausible-looking integer.
+ */
+const DECIMAL_PATTERN = /^[+-]?\d+(?:\.\d+)?$/
+
+/**
  * Numbers arrive float-formatted: '3.0', '4950.0', '0.0'. Parsing with
  * parseInt would read '4950.0' as 4950 by luck and '0.5' as 0 by accident, so
  * the whole value is parsed and then required to be integral.
  */
 function parseIntegral(raw: string, what: string): number {
-  const value = Number(raw.trim())
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+  const text = raw.trim()
+  if (!DECIMAL_PATTERN.test(text)) {
+    throw new Error(`${what} is not a decimal number: ${JSON.stringify(raw)}`)
+  }
+
+  const value = Number(text)
+  if (!Number.isInteger(value)) {
     throw new Error(`${what} is not an integer: ${JSON.stringify(raw)}`)
+  }
+  // Past 2^53 the parse is lossy, so the value read back is not the value sent.
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${what} is too large to represent exactly: ${JSON.stringify(raw)}`)
   }
   return value
 }
@@ -43,6 +61,15 @@ function parseIntegral(raw: string, what: string): number {
 const TERM_PATTERN = /^\d{4}$/
 /** Verified across all 292 codes: uppercase letters plus & and -. */
 const SUBJECT_PATTERN = /^[A-Z&-]{1,8}$/
+/**
+ * Course numbers are not all numeric.
+ *
+ * Measured across all 17,338 rows: 799 distinct values, longest 4 characters,
+ * drawn from digits plus W, X and Y — `1W`, `5W`, `7W` are workshop sections and
+ * `XXXX`, `YYYY` belong to FRSP. Generous enough to cover any letter, tight
+ * enough that a course key can never carry a separator or a path.
+ */
+const COURSE_NUMBER_PATTERN = /^[0-9A-Z]{1,8}$/
 
 export function termCode(raw: string): TermCode {
   const value = raw.trim()
@@ -68,14 +95,27 @@ export function subjectCode(raw: string): SubjectCode {
 export function courseKey(subject: string, number: string): CourseKey {
   const trimmedNumber = number.trim()
   if (trimmedNumber === '') throw new Error('course number is empty')
+  // Both halves are validated, not just the subject. An unchecked number half
+  // makes 'EECS|../../etc/passwd' a perfectly constructible CourseKey, and a
+  // number containing '|' would split back into the wrong two pieces.
+  if (!COURSE_NUMBER_PATTERN.test(trimmedNumber)) {
+    throw new Error(`malformed course number: ${JSON.stringify(number)}`)
+  }
   return `${subjectCode(subject)}|${trimmedNumber}` as CourseKey
 }
 
 /** Splits a course key back into its parts, for display and diagnostics. */
 export function splitCourseKey(key: CourseKey): { subject: SubjectCode; number: string } {
   const separator = key.indexOf('|')
+  // Without this, a key with no separator returns nonsense rather than failing:
+  // indexOf gives −1, slice(0, −1) drops the last character, and
+  // splitCourseKey('EECS138') answers { subject: 'EECS13', number: 'EECS138' }.
+  // Only a cast can produce such a key, and a cast is exactly what the type
+  // system cannot stop.
+  if (separator < 0) throw new Error(`not a course key: ${JSON.stringify(key)}`)
+
   return {
-    subject: key.slice(0, separator) as SubjectCode,
+    subject: subjectCode(key.slice(0, separator)),
     number: key.slice(separator + 1),
   }
 }
@@ -96,8 +136,16 @@ export function classNbr(raw: string): ClassNbr {
 export function combSectId(raw: string): CombSectId | null {
   const trimmed = raw.trim()
   if (trimmed === '') return null
+
   const value = parseIntegral(trimmed, 'combined section id')
-  return value === 0 ? null : (value as CombSectId)
+  if (value === 0) return null
+  // Held to the same standard as classNbr, which rejects negatives. These two
+  // columns exist side by side and the module's whole job is keeping them
+  // straight; one of them quietly accepting −5 undoes that.
+  if (value < 0) {
+    throw new Error(`combined section id must be positive: ${JSON.stringify(raw)}`)
+  }
+  return value as CombSectId
 }
 
 /**
