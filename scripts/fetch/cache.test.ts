@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RawCache } from './cache.ts'
@@ -104,6 +104,48 @@ describe('misses', () => {
 
     expect(await cache.has({ term: '4269', subject: 'EECS' })).toBe(false)
     expect(await cache.read({ term: '4269', subject: 'EECS' })).toBeNull()
+  })
+})
+
+describe('errors that are not misses', () => {
+  it('refuses a malformed key instead of reporting it absent forever', async () => {
+    // The defect: a bare catch swallowed pathFor's validation error, so a bad
+    // key read as "not cached" — which is an instruction to go and ask KU for
+    // it. Every run. The write that would finally object happens after the
+    // request has already been spent.
+    const cache = new RawCache(root)
+
+    await expect(cache.read({ term: 'FALL', subject: 'EECS' })).rejects.toThrow(/malformed term/)
+    await expect(cache.has({ term: 'FALL', subject: 'EECS' })).rejects.toThrow(/malformed term/)
+    await expect(cache.read({ term: '4269', subject: '../etc' })).rejects.toThrow(
+      /malformed subject/,
+    )
+    await expect(cache.has({ term: '4269', subject: '../etc' })).rejects.toThrow(
+      /malformed subject/,
+    )
+  })
+
+  it('reports a directory sitting where the file belongs', async () => {
+    // Not absence — a broken cache. Silence here resumes past it.
+    const cache = new RawCache(root)
+    const key = { term: '4269', subject: 'EECS' }
+    await mkdir(cache.pathFor(key), { recursive: true })
+
+    await expect(cache.read(key)).rejects.toThrow(/EISDIR/)
+    await expect(cache.has(key)).rejects.toThrow(/not a file/)
+  })
+
+  it('still reports a genuinely missing file as a miss', async () => {
+    // The distinction has to cut both ways, or resume stops working.
+    const cache = new RawCache(root)
+    expect(await cache.read({ term: '4269', subject: 'BIOL' })).toBeNull()
+    expect(await cache.has({ term: '4269', subject: 'BIOL' })).toBe(false)
+  })
+
+  it('reports a miss when the term directory does not exist at all', async () => {
+    const cache = new RawCache(root)
+    expect(await cache.read({ term: '4259' })).toBeNull()
+    expect(await cache.has({ term: '4259' })).toBe(false)
   })
 })
 

@@ -36,6 +36,18 @@ const TERM_PATTERN = /^\d{4}$/
  */
 const WHOLE_TERM_BASENAME = '__whole-term'
 
+/**
+ * The one filesystem error that means "not cached".
+ *
+ * Every other one — EACCES, EISDIR, EPERM, or a validation error from
+ * `pathFor` — used to be swallowed by a bare catch and reported as a miss. That
+ * is the expensive direction to be wrong in: a miss sends the crawler to KU for
+ * a file it may already hold, every run, and a malformed key would do so
+ * forever, because the write that finally throws happens after the request.
+ */
+const isNotFound = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ENOENT'
+
 export class RawCache {
   readonly #root: string
 
@@ -61,22 +73,33 @@ export class RawCache {
    * True when a usable cached file exists. A zero-byte file counts as absent:
    * it can only be the residue of a failed write, and treating it as a hit
    * would resume straight past a hole in the data.
+   *
+   * Only "the file is not there" is a miss. Anything else — a malformed key, a
+   * permission error, a directory sitting where the file belongs — is reported,
+   * because a miss is an instruction to go and ask KU for it again.
    */
   async has(key: CacheKey): Promise<boolean> {
+    const path = this.pathFor(key)
+    let info
     try {
-      return (await stat(this.pathFor(key))).size > 0
-    } catch {
-      return false
+      info = await stat(path)
+    } catch (error) {
+      if (isNotFound(error)) return false
+      throw error
     }
+    if (!info.isFile()) throw new Error(`cache path exists but is not a file: ${path}`)
+    return info.size > 0
   }
 
-  /** Cached bytes, or null when there is no usable entry. */
+  /** Cached bytes, or null when there is genuinely no entry. */
   async read(key: CacheKey): Promise<Uint8Array | null> {
+    const path = this.pathFor(key)
     try {
-      const bytes = await readFile(this.pathFor(key))
+      const bytes = await readFile(path)
       return bytes.byteLength > 0 ? new Uint8Array(bytes) : null
-    } catch {
-      return null
+    } catch (error) {
+      if (isNotFound(error)) return null
+      throw error
     }
   }
 
