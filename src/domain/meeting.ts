@@ -30,13 +30,23 @@ export interface Place {
   readonly room: string | null
 }
 
+/**
+ * A meeting with a place on the timetable.
+ *
+ * The invariants below are enforced by classifyMeeting, which is the only thing
+ * that builds one — the TYPE does not express them, and an object literal or a
+ * cast can violate every one. Stating that plainly matters more here than
+ * elsewhere: the discriminated union really does make an unscheduled meeting
+ * unable to reach the conflict checker, and it would be easy to read that
+ * genuine guarantee as covering these, which it does not.
+ */
 export interface ScheduledMeeting {
   readonly kind: 'scheduled'
-  /** Invariant: non-zero. A meeting on no days is not scheduled. */
+  /** Enforced non-zero: a meeting on no days is not scheduled. */
   readonly days: DayMask
   readonly start: MinuteOfDay
   /**
-   * Invariant: strictly greater than start. A class ending at midnight carries
+   * Enforced strictly greater than start. A class ending at midnight carries
    * END_OF_DAY (1440), not 0 — 0 would run the meeting backwards.
    */
   readonly end: MinuteOfDay
@@ -90,7 +100,17 @@ export interface MeetingInput {
   /** null when the Start column was not a clock time, e.g. 'APPT' or blank. */
   readonly start: MinuteOfDay | null
   readonly end: MinuteOfDay | null
-  /** The Start column verbatim, needed to tell 'APPT' from a blank. */
+  /**
+   * The Start column verbatim, needed to tell 'APPT' from a blank.
+   *
+   * Only the Start column, so a blank Start with 'APPT' in End would classify
+   * as 'tba' rather than 'appointment'. Measured across all 17,338 rows, that
+   * shape does not occur — the four combinations present are APPT/blank
+   * (7,163), time/time (6,059), midnight/midnight (4,115) and one row of
+   * blank/midnight. Carrying rawEnd would be speculative work against a case
+   * the data does not contain; this note is here so the gap is a decision
+   * rather than an oversight.
+   */
   readonly rawStart: string
   readonly span: DateSpan
   readonly place: Place

@@ -58,7 +58,12 @@ export function describePlan(term: string): string {
     `       (whole-term export for ${term})`,
     '',
     `Expected: ${SUBJECT_CODES.length} subjects in the result.`,
-    'Cached results are reused, so a rerun issues zero requests.',
+    // Precisely one, not zero. The export is cached; the catalogue check is not,
+    // and is deliberately unconditional — a stale subject list is what would
+    // make a crawl silently under-collect. In a command whose entire purpose is
+    // stating traffic before sending any, being off by one request is not a
+    // rounding error.
+    'A rerun reuses the cached export and issues only request 1.',
   ].join('\n')
 }
 

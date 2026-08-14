@@ -335,11 +335,27 @@ describe('toDayOffset', () => {
   })
 
   it('is unaffected by daylight saving, which falls inside the term', () => {
-    // US DST ends 2026-11-01. A naive local-time implementation drifts an hour
-    // here and rounds to the wrong day.
+    // US DST ends 2026-11-01, inside the term.
+    //
+    // This test used to claim it caught a naive local-time implementation. It
+    // does not, and saying so was worse than not testing it: across a DST
+    // boundary local midnights are 23 or 25 hours apart, which is 0.96 or 1.04
+    // days, and Math.round absorbs every one of them. A local-time version
+    // passes this and every other assertion here.
+    //
+    // What actually keeps the model on UTC is that `Date.parse` reads a bare
+    // YYYY-MM-DD as UTC, and isoDate refuses every other spelling — the formats
+    // that WOULD parse as local time cannot reach this function.
     const before = toDayOffset(fall2026, isoDate('2026-10-31'))
     const after = toDayOffset(fall2026, isoDate('2026-11-02'))
     expect(after - before).toBe(2)
+  })
+
+  it('refuses the date formats that would be read as local time', () => {
+    // The real defence, stated as a test rather than as a comment.
+    for (const local of ['2026/10/31', '10/31/2026', 'Oct 31 2026']) {
+      expect(() => isoDate(local), local).toThrow(/not an ISO date/)
+    }
   })
 
   it('throws on an unparseable epoch instead of returning NaN', () => {

@@ -7,8 +7,16 @@
  * All three arrive as strings of digits. Branding turns a mix-up from a silent
  * join on the wrong column into a compile error.
  *
- * The smart constructors below are the only way to mint a branded value, so
- * every one has been validated at the boundary where raw data enters.
+ * The smart constructors below are the only VALIDATING way to mint a branded
+ * value. They are not the only way: `'anything' as TermCode` compiles wherever
+ * it is written, because a brand is a compile-time fiction with no runtime
+ * existence. What branding buys is that the mistake has to be deliberate and is
+ * visible in review, not that it is impossible.
+ *
+ * So functions here re-validate what they are handed rather than trusting the
+ * type — splitCourseKey runs its subject half back through subjectCode, because
+ * the only way to reach it with a malformed key is a cast, and a cast is exactly
+ * what the type system cannot stop.
  */
 
 declare const brand: unique symbol

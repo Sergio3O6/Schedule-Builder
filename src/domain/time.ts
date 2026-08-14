@@ -67,8 +67,16 @@ const MS_PER_DAY = 86_400_000
  *
  * The two encodings differ and the difference is a live trap: a search request
  * uses single letters `N M T W R F S`, while the export emits `M Tu W Th F Sa
- * Su`. Tokens are variable width, so Tu/Th/Sa/Su must be matched before the
- * single letters or 'Th' reads as 'T' followed by a stray 'h'.
+ * Su`.
+ *
+ * The two-letter tokens are listed first, but that ordering is currently inert
+ * and it is worth saying so plainly: `[MWF]` contains no T and no S, so nothing
+ * can match the first letter of Tu/Th/Sa/Su. The comment here used to claim the
+ * ordering was what stopped 'Th' reading as 'T' plus a stray 'h', which was
+ * fiction — there is no rule producing a bare 'T' to compete with.
+ *
+ * The ordering is kept because the hazard becomes real the moment anyone adds
+ * the search-form letters, and it costs nothing to already be right.
  *
  * Verified complete: this pattern consumes all 17,338 day strings in the Fall
  * 2026 export with no unmatched remainder.

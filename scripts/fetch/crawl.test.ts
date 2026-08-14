@@ -61,6 +61,16 @@ describe('describePlan', () => {
     expect(plan).toContain('no requests will be made')
   })
 
+  it('states the warm-rerun cost that the rerun test actually measures', () => {
+    // It used to promise zero requests on a rerun while the test at the bottom
+    // of this file asserted one — the catalogue check is deliberately
+    // unconditional and uncached. In a command whose whole purpose is stating
+    // traffic before sending any, the two have to agree.
+    const plan = describePlan('4269')
+    expect(plan).toContain('only request 1')
+    expect(plan).not.toContain('zero requests')
+  })
+
   it('shows the export URL with the inverted flags pinned safe', () => {
     const plan = describePlan('4269')
     expect(plan).toContain('searchClosed=false')
