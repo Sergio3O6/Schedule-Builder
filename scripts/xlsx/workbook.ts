@@ -207,10 +207,72 @@ export function unescapeXml(text: string): string {
   })
 }
 
-/** Concatenated text of every <t> in a fragment, runs included. */
+/**
+ * An attribute list, allowing '>' inside a quoted value.
+ *
+ * `[^>]*` is the obvious way to write this and it is wrong: `>` is perfectly
+ * legal inside an attribute value, and XML writers are not required to escape
+ * it. When one appears, the tag match ends early, the truncated attributes no
+ * longer contain `r=`, and the cell is DROPPED — the only failure in this file
+ * that loses data instead of throwing. A row would come back one column short
+ * with nothing anywhere reporting a problem.
+ */
+const ATTRS = String.raw`(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*`
+
+/**
+ * `<tag …/>` or `<tag …>body</tag>`, body in group 1.
+ *
+ * The attribute pattern spells out name=value structure rather than "quoted
+ * strings or anything that is not '>'". The loose version reads plausibly and
+ * is catastrophic: from `<row r="1"><c r="A1"` the quoted alternative can pair
+ * the closing quote of one attribute with the opening quote of the NEXT
+ * element's, stepping over the `>` between them, and from there it consumes the
+ * whole document and returns one match. Requiring `>` to appear only inside a
+ * value that follows an `=` keeps the escape hatch and closes the hole.
+ *
+ * No \b after the tag name: an empty attribute list must be followed
+ * immediately by `>` or `/>`, so `<rowBreak>` cannot match `<row`.
+ */
+const bodyOf = (tag: string): RegExp =>
+  new RegExp(`<${tag}${ATTRS}/>|<${tag}${ATTRS}>([\\s\\S]*?)</${tag}>`, 'g')
+
+const T_ELEMENT = bodyOf('t')
+const SI_ELEMENT = bodyOf('si')
+const ROW_ELEMENT = bodyOf('row')
+const RPH_ELEMENT = bodyOf('rPh')
+const V_ELEMENT = new RegExp(`<v${ATTRS}>([\\s\\S]*?)</v>`)
+const CELL_ELEMENT = new RegExp(`<c(${ATTRS})/>|<c(${ATTRS})>([\\s\\S]*?)</c>`, 'g')
+const COMMENT = /<!--[\s\S]*?-->/g
+
+/**
+ * Removes anything that looks like markup but is not, and refuses what cannot
+ * be handled by matching.
+ *
+ * A comment containing a `<c>` element is read as a real cell by a
+ * regex-and-hope reader, and CDATA hides markup characters from every pattern
+ * here. Neither appears in KU's output; the point is that if either ever does,
+ * this says so rather than quietly returning different numbers.
+ */
+function prepareXml(xml: string): string {
+  if (xml.includes('<![CDATA[')) {
+    throw new Error('worksheet XML contains CDATA, which this reader does not parse')
+  }
+  return xml.includes('<!--') ? xml.replace(COMMENT, '') : xml
+}
+
+/**
+ * Concatenated text of every <t> in a fragment, rich-text runs included.
+ *
+ * Phonetic runs are dropped first. `<rPh>` carries a pronunciation guide for
+ * the text around it — furigana, in practice — and its `<t>` elements are
+ * indistinguishable from real ones here, so leaving them in appends a reading
+ * to the string it annotates.
+ */
 function textOf(fragment: string): string {
+  const text = fragment.includes('<rPh') ? fragment.replace(RPH_ELEMENT, '') : fragment
+
   let out = ''
-  for (const match of fragment.matchAll(/<t\b[^>]*\/>|<t\b[^>]*>([\s\S]*?)<\/t>/g)) {
+  for (const match of text.matchAll(T_ELEMENT)) {
     out += unescapeXml(match[1] ?? '')
   }
   return out
@@ -218,9 +280,7 @@ function textOf(fragment: string): string {
 
 /** The shared string table, indexed as the sheet references it. */
 export function parseSharedStrings(xml: string): string[] {
-  return [...xml.matchAll(/<si\b[^>]*\/>|<si\b[^>]*>([\s\S]*?)<\/si>/g)].map((m) =>
-    textOf(m[1] ?? ''),
-  )
+  return [...prepareXml(xml).matchAll(SI_ELEMENT)].map((m) => textOf(m[1] ?? ''))
 }
 
 /** Column letters from a cell reference: "AB12" -> "AB". */
@@ -233,16 +293,22 @@ function columnOf(ref: string): string {
 export function parseSheet(xml: string, sharedStrings: readonly string[]): SheetRow[] {
   const rows: SheetRow[] = []
 
-  for (const rowMatch of xml.matchAll(/<row\b[^>]*\/>|<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+  for (const rowMatch of prepareXml(xml).matchAll(ROW_ELEMENT)) {
     const body = rowMatch[1] ?? ''
     const cells = new Map<string, string>()
 
-    for (const cellMatch of body.matchAll(/<c\b([^>]*)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+    for (const cellMatch of body.matchAll(CELL_ELEMENT)) {
       const attrs = cellMatch[1] ?? cellMatch[2] ?? ''
       const content = cellMatch[3] ?? ''
 
       const ref = /\br="([^"]+)"/.exec(attrs)?.[1]
-      if (ref === undefined) continue // a cell with no reference has no column to live in
+      if (ref === undefined) {
+        // The spec permits a positional cell with no r=, and KU emits r= on
+        // every one of the 17,338 x 32. Skipping was the old behaviour and it
+        // silently shifted nothing while quietly losing a value; if the
+        // generator ever changes, that is worth hearing about immediately.
+        throw new Error(`cell with no r= reference in <c ${attrs.trim()}>`)
+      }
       const type = /\bt="([^"]+)"/.exec(attrs)?.[1] ?? 'n'
 
       cells.set(columnOf(ref), cellValue(type, content, sharedStrings, ref))
@@ -262,7 +328,7 @@ function cellValue(
 ): string {
   if (type === 'inlineStr') return textOf(content)
 
-  const raw = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(content)?.[1]
+  const raw = V_ELEMENT.exec(content)?.[1]
   if (raw === undefined) return ''
 
   if (type === 's') {
@@ -275,6 +341,27 @@ function cellValue(
   }
 
   return unescapeXml(raw)
+}
+
+/**
+ * Decodes a member as UTF-8, refusing anything that plainly is not.
+ *
+ * A UTF-16 part is legal XML and decodes here into text interleaved with NUL
+ * bytes, which matches no pattern in this file — the result is not an error but
+ * an empty sheet. TextDecoder is also lenient by default, turning invalid bytes
+ * into U+FFFD, so a mis-encoded course title would arrive quietly mangled;
+ * `fatal` makes that a failure instead.
+ */
+function decodeUtf8(bytes: Uint8Array, name: string): string {
+  const [b0, b1] = bytes
+  if ((b0 === 0xff && b1 === 0xfe) || (b0 === 0xfe && b1 === 0xff)) {
+    throw new Error(`${name} is UTF-16; this reader handles UTF-8 only`)
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    throw new Error(`${name} is not valid UTF-8`)
+  }
 }
 
 /**
@@ -293,13 +380,14 @@ export function readWorkbook(bytes: Uint8Array): SheetRow[] {
     throw new Error(`expected a single-sheet workbook, found ${sheetNames.length}`)
   }
 
-  const decoder = new TextDecoder()
   const sharedStringsXml = entries.get('xl/sharedStrings.xml')
   const sharedStrings =
-    sharedStringsXml === undefined ? [] : parseSharedStrings(decoder.decode(sharedStringsXml))
+    sharedStringsXml === undefined
+      ? []
+      : parseSharedStrings(decodeUtf8(sharedStringsXml, 'xl/sharedStrings.xml'))
 
   const sheetXml = entries.get(sheetName)
   if (sheetXml === undefined) throw new Error(`worksheet ${sheetName} is missing its data`)
 
-  return parseSheet(decoder.decode(sheetXml), sharedStrings)
+  return parseSheet(decodeUtf8(sheetXml, sheetName), sharedStrings)
 }

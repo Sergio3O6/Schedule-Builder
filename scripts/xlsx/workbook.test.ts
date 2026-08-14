@@ -190,6 +190,72 @@ describe('readZipEntries — archives that are wrong rather than absent', () => 
   })
 })
 
+describe('XML shapes that used to corrupt silently', () => {
+  it('keeps a cell whose attribute contains a literal >', () => {
+    // The one failure in this reader that LOSES DATA rather than throwing.
+    // '>' is legal inside an attribute value and writers need not escape it;
+    // [^>]* ended the tag early, the truncated attributes no longer held r=,
+    // and the cell was dropped — a row one column short, silently.
+    // The offending attribute comes BEFORE r=, which is where it does damage:
+    // the truncated attribute list no longer contains the reference at all.
+    // Attribute order is the writer's choice, so this is not a contrived
+    // arrangement — it is the half of the cases that lose the cell.
+    const xml =
+      '<sheetData><row r="1">' +
+      '<c s="0" r="A1"><v>1</v></c>' +
+      '<c x="a>b" r="B1" t="inlineStr"><is><t>kept</t></is></c>' +
+      '<c s="0" r="C1"><v>3</v></c>' +
+      '</row></sheetData>'
+    const row = parseSheet(xml, [])[0]
+
+    expect([...(row?.keys() ?? [])]).toEqual(['A', 'B', 'C'])
+    expect(row?.get('B')).toBe('kept')
+  })
+
+  it('keeps a row whose own attribute contains a literal >', () => {
+    const xml = '<sheetData><row x="a>b" r="1"><c r="A1"><v>7</v></c></row></sheetData>'
+    expect(parseSheet(xml, [])[0]?.get('A')).toBe('7')
+  })
+
+  it('refuses a cell with no reference rather than dropping it', () => {
+    const xml = '<sheetData><row r="1"><c t="n"><v>7</v></c></row></sheetData>'
+    expect(() => parseSheet(xml, [])).toThrow(/no r= reference/)
+  })
+
+  it('ignores a commented-out cell instead of reading it as data', () => {
+    const xml =
+      '<sheetData><row r="1"><c r="A1"><v>real</v></c>' +
+      '<!-- <c r="B1"><v>99</v></c> --></row></sheetData>'
+    const row = parseSheet(xml, [])[0]
+
+    expect(row?.get('A')).toBe('real')
+    expect(row?.has('B')).toBe(false)
+  })
+
+  it('refuses CDATA rather than parsing around it', () => {
+    // It hides markup characters from every pattern in this file, so the honest
+    // answer is that this reader cannot read it.
+    const xml = '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t><![CDATA[x]]></t></is></c></row></sheetData>'
+    expect(() => parseSheet(xml, [])).toThrow(/CDATA/)
+  })
+
+  it('drops phonetic runs instead of appending them to the string', () => {
+    // <rPh> carries a pronunciation guide for the text around it, and its <t>
+    // elements are indistinguishable from real ones to a pattern match.
+    const xml = '<sst><si><t>東京</t><rPh sb="0" eb="2"><t>とうきょう</t></rPh></si></sst>'
+    expect(parseSharedStrings(xml)).toEqual(['東京'])
+  })
+
+  it('keeps a shared string whose attribute contains a literal >', () => {
+    expect(parseSharedStrings('<sst><si x="a>b"><t>Intro</t></si></sst>')).toEqual(['Intro'])
+  })
+
+  it('reads a formula cell by its cached value, not its expression', () => {
+    const xml = '<sheetData><row r="1"><c r="A1"><f>IF(B1&gt;2,1,0)</f><v>1</v></c></row></sheetData>'
+    expect(parseSheet(xml, [])[0]?.get('A')).toBe('1')
+  })
+})
+
 describe('readWorkbook against the real KU export', () => {
   it('reads the header row exactly as KU emits it', async () => {
     const rows = await readWorkbook(await eecs())
