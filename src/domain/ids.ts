@@ -19,6 +19,8 @@
  * what the type system cannot stop.
  */
 
+import { parseIntegral } from './number.ts'
+
 declare const brand: unique symbol
 type Brand<T, B extends string> = T & { readonly [brand]: B }
 
@@ -36,37 +38,6 @@ export type CombSectId = Brand<number, 'CombSectId'>
 export type SectionNumber = Brand<string, 'SectionNumber'>
 /** A registerable unit, the solver's alphabet. */
 export type UnitId = Brand<string, 'UnitId'>
-
-/**
- * Plain decimal, which is the only shape this data ever takes.
- *
- * Number() accepts a great deal more than that, and silently: '0x4B6A' becomes
- * 19306, '1e4' becomes 10000, '' becomes 0, and 'Infinity' parses. None can be
- * a real class number, and each would arrive as a plausible-looking integer.
- */
-const DECIMAL_PATTERN = /^[+-]?\d+(?:\.\d+)?$/
-
-/**
- * Numbers arrive float-formatted: '3.0', '4950.0', '0.0'. Parsing with
- * parseInt would read '4950.0' as 4950 by luck and '0.5' as 0 by accident, so
- * the whole value is parsed and then required to be integral.
- */
-function parseIntegral(raw: string, what: string): number {
-  const text = raw.trim()
-  if (!DECIMAL_PATTERN.test(text)) {
-    throw new Error(`${what} is not a decimal number: ${JSON.stringify(raw)}`)
-  }
-
-  const value = Number(text)
-  if (!Number.isInteger(value)) {
-    throw new Error(`${what} is not an integer: ${JSON.stringify(raw)}`)
-  }
-  // Past 2^53 the parse is lossy, so the value read back is not the value sent.
-  if (!Number.isSafeInteger(value)) {
-    throw new Error(`${what} is too large to represent exactly: ${JSON.stringify(raw)}`)
-  }
-  return value
-}
 
 const TERM_PATTERN = /^\d{4}$/
 /** Verified across all 292 codes: uppercase letters plus & and -. */
