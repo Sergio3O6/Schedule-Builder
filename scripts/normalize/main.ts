@@ -19,6 +19,7 @@ import { assertColumnLayout, cell } from './columns.ts'
 import { deriveTermCalendar, describeCalendar, modalDateSpan } from './calendar.ts'
 import { buildSections } from './rows.ts'
 import { bundleSubject, bytesOf, subjectsIn } from './bundle.ts'
+import { buildCatalog, catalogBytes } from './catalog.ts'
 import { subjectCode, termCode } from '../../src/domain/ids.ts'
 import type { SubjectCode } from '../../src/domain/ids.ts'
 
@@ -107,6 +108,19 @@ async function main(): Promise<number> {
     await writeFile(join(outDir, bundleFileName(subject)), payload)
     written += 1
     bytes += payload.byteLength
+  }
+
+  // The index covers the whole term, so it is only written on a full run.
+  // A --subject run would otherwise replace it with a one-subject catalogue
+  // and silently make every other course unfindable.
+  if (only === undefined) {
+    const catalog = buildCatalog(sections, calendar)
+    const encoded = catalogBytes(catalog)
+    await writeFile(join(outDir, 'index.json'), encoded)
+    console.log(`  index.json: ${catalog.courses.length} courses`)
+    bytes += encoded.byteLength
+  } else {
+    console.log('  index.json not written: a --subject run does not see the whole term')
   }
 
   console.log(`\nWrote ${written} bundles to ${outDir} (${(bytes / 1024).toFixed(1)}KB)`)
