@@ -14,28 +14,21 @@
  * purpose: it is a format the loader depends on, so it should be chosen against
  * a measured payload rather than an assumed one, and this file is what produces
  * the first measurement. `bytesOf` exists to take it.
+ *
+ * The SubjectBundle shape itself is defined in src/data/bundle.ts, on the
+ * reading side. A generator that owns its own output format can change it and
+ * stay internally consistent while every consumer breaks; with the reader
+ * owning it, conforming is this module's job and typecheck enforces it.
  */
 
 import { splitCourseKey } from '../../src/domain/ids.ts'
-import type { SubjectCode, TermCode } from '../../src/domain/ids.ts'
+import type { SubjectBundle } from '../../src/data/bundle.ts'
+import type { SubjectCode } from '../../src/domain/ids.ts'
 import type { Section } from '../../src/domain/section.ts'
 import type { TermCalendar } from '../../src/domain/time.ts'
 
-export interface SubjectBundle {
-  readonly term: TermCode
-  readonly subject: SubjectCode
-  /**
-   * The epoch every DayOffset in this file is measured from.
-   *
-   * Written here rather than assumed by the client because the two drifting
-   * apart is silent: every partial-term comparison quietly moves and no
-   * assertion fires. Carried per file, so a stale cached bundle cannot be read
-   * against a newer term's origin.
-   */
-  readonly startDate: string
-  readonly endDate: string
-  readonly sections: readonly Section[]
-}
+// Re-exported so the normalizer's own callers need not reach across into src/.
+export type { SubjectBundle }
 
 /** The sections of one subject, in the export's own order. */
 export function sectionsForSubject(
