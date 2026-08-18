@@ -1,5 +1,13 @@
 /**
- * The enum-like columns, and why they are open rather than closed.
+ * The attributes of one section, and the parsers that read them.
+ *
+ * Three shapes live here, and each is shaped by something the data does rather
+ * than by what the column name suggests: vocabularies that are open because KU
+ * extends them, a credit range because half the catalogue does not have a
+ * single credit value, and seat counts that are recorded rather than reconciled
+ * because they contradict each other.
+ *
+ * ## Open vocabularies
  *
  * `Component`, `Acad career` and `Consent` are PeopleSoft vocabularies. KU
  * configures them, KU extends them, and the export is the only place we learn
@@ -19,6 +27,8 @@
  * degrading it to `{kind:'other', raw:''}` would hand every consumer a value
  * that says nothing while reporting success.
  */
+
+import { parseDecimal, parseIntegral } from './number.ts'
 
 /**
  * All 16 component codes in the Fall 2026 export, with live row counts:
@@ -128,4 +138,102 @@ export function parseEnrollable(raw: string): boolean {
   if (value === 'YES') return true
   if (value === 'NO') return false
   throw new Error(`enrollable is neither Yes nor No: ${JSON.stringify(raw)}`)
+}
+
+/**
+ * Credit hours, as a range.
+ *
+ * Not a single number: 8,378 of the 17,338 rows publish a Min below their Max,
+ * which is nearly half the file. A student registering for one of those picks a
+ * value at enrolment, so a model that collapsed the range would be stating a
+ * credit total the student has not chosen yet — and would do it for half the
+ * catalogue.
+ *
+ * The bounds are wider than they look. Min runs 0 to 14 and Max 0 to 16; 89
+ * rows have a Max of 0, which is a real zero-credit section rather than a
+ * missing value; and 22 rows are fractional (0.25, 0.5, 1.5), which is why this
+ * parses as a decimal and not as a count.
+ */
+export interface Credits {
+  readonly min: number
+  readonly max: number
+}
+
+export function parseCredits(min: string, max: string): Credits {
+  const low = parseDecimal(min, 'minimum credit hours')
+  const high = parseDecimal(max, 'maximum credit hours')
+
+  // Negative credit is not a thing, and reading the wrong column is.
+  if (low < 0) throw new Error(`minimum credit hours is negative: ${JSON.stringify(min)}`)
+  if (high < 0) throw new Error(`maximum credit hours is negative: ${JSON.stringify(max)}`)
+  // Holds in all 17,338 rows today. If it ever stops holding, the range is
+  // empty and every consumer that renders or sums it is showing nonsense.
+  if (low > high) {
+    throw new Error(
+      `minimum credit hours exceeds maximum: ${JSON.stringify(min)} > ${JSON.stringify(max)}`,
+    )
+  }
+
+  return { min: low, max: high }
+}
+
+/** True for the 8,378 rows where the student chooses the credit at enrolment. */
+export function isVariableCredit(credits: Credits): boolean {
+  return credits.max > credits.min
+}
+
+/**
+ * Seat counts, recorded rather than reconciled.
+ *
+ * These four numbers do not agree with each other and are not expected to.
+ * `cap - enrolled === seatsAvailable` fails in 1,048 rows; 375 rows enrol more
+ * students than their cap allows; and 431 report a negative `seatsAvailable`,
+ * down to -104. Reserved-capacity rules, permission overrides and a feed that
+ * snapshots each column at its own moment all produce this legitimately.
+ *
+ * So there is no derived `isFull` here and no arithmetic check in the parser.
+ * Each field is a separate thing KU published, and any conclusion drawn by
+ * combining them would be a guess presented as a fact. Bounds are enforced only
+ * where a value cannot mean anything otherwise.
+ */
+export interface Enrollment {
+  readonly cap: number
+  readonly enrolled: number
+  /** Signed on purpose: 431 rows are negative. */
+  readonly seatsAvailable: number
+  readonly waitCap: number
+  readonly waitTotal: number
+}
+
+/**
+ * Named fields, not positional arguments.
+ *
+ * Five small non-negative integers in a row is the exact shape where a
+ * transposed pair reads as perfectly normal data and no test notices. The
+ * caller has to say which column is which.
+ */
+export interface RawEnrollment {
+  readonly cap: string
+  readonly enrolled: string
+  readonly seatsAvailable: string
+  readonly waitCap: string
+  readonly waitTotal: string
+}
+
+export function parseEnrollment(raw: RawEnrollment): Enrollment {
+  const count = (value: string, what: string): number => {
+    const parsed = parseIntegral(value, what)
+    if (parsed < 0) throw new Error(`${what} is negative: ${JSON.stringify(value)}`)
+    return parsed
+  }
+
+  return {
+    cap: count(raw.cap, 'enrollment cap'),
+    enrolled: count(raw.enrolled, 'total enrolled'),
+    // The one field that is allowed below zero, because the feed really does
+    // publish it that way when a section is over-enrolled.
+    seatsAvailable: parseIntegral(raw.seatsAvailable, 'seats available'),
+    waitCap: count(raw.waitCap, 'waitlist cap'),
+    waitTotal: count(raw.waitTotal, 'waitlist total'),
+  }
 }

@@ -3,10 +3,13 @@ import {
   CAREER_CODES,
   COMPONENT_CODES,
   CONSENT_CODES,
+  isVariableCredit,
   parseCareer,
   parseComponent,
   parseConsent,
+  parseCredits,
   parseEnrollable,
+  parseEnrollment,
   vocabularyLabel,
 } from './section.ts'
 
@@ -124,5 +127,109 @@ describe('parseEnrollable', () => {
     for (const bad of ['', 'Y', 'true', 'Maybe', '1']) {
       expect(() => parseEnrollable(bad), bad).toThrow(/neither Yes nor No/)
     }
+  })
+})
+
+describe('parseCredits', () => {
+  it('reads a fixed credit value', () => {
+    expect(parseCredits('3.0', '3.0')).toEqual({ min: 3, max: 3 })
+  })
+
+  it('keeps a range as a range', () => {
+    // 8,378 of 17,338 rows — nearly half the file — publish a Min below their
+    // Max. Collapsing that would state a credit total the student has not
+    // chosen yet, for half the catalogue.
+    expect(parseCredits('1.0', '6.0')).toEqual({ min: 1, max: 6 })
+    expect(isVariableCredit(parseCredits('1.0', '6.0'))).toBe(true)
+    expect(isVariableCredit(parseCredits('3.0', '3.0'))).toBe(false)
+  })
+
+  it('keeps the fractional hours 22 rows really use', () => {
+    expect(parseCredits('0.25', '0.25')).toEqual({ min: 0.25, max: 0.25 })
+    expect(parseCredits('0.5', '1.5')).toEqual({ min: 0.5, max: 1.5 })
+  })
+
+  it('accepts a zero-credit section as a real value', () => {
+    // 89 rows have Max 0.0 and 363 have Min 0.0. Treating zero as missing
+    // would silently drop them or invent hours they do not carry.
+    expect(parseCredits('0.0', '0.0')).toEqual({ min: 0, max: 0 })
+    expect(parseCredits('0.0', '3.0')).toEqual({ min: 0, max: 3 })
+  })
+
+  it('spans the full measured range', () => {
+    // Min runs to 14 and Max to 16 in the live export.
+    expect(parseCredits('14.0', '16.0')).toEqual({ min: 14, max: 16 })
+  })
+
+  it('refuses an inverted range', () => {
+    // Holds in all 17,338 rows today. If it stops holding, the range is empty
+    // and everything that renders or sums it is showing nonsense.
+    expect(() => parseCredits('6.0', '1.0')).toThrow(/minimum credit hours exceeds maximum/)
+  })
+
+  it('refuses negative credit', () => {
+    expect(() => parseCredits('-1.0', '3.0')).toThrow(/minimum credit hours is negative/)
+    expect(() => parseCredits('0.0', '-3.0')).toThrow(/maximum credit hours is negative/)
+  })
+
+  it('refuses a blank, which would otherwise read as zero credit', () => {
+    expect(() => parseCredits('', '3.0')).toThrow(/minimum credit hours is not a decimal/)
+  })
+})
+
+describe('parseEnrollment', () => {
+  const raw = {
+    cap: '30.0',
+    enrolled: '10.0',
+    seatsAvailable: '20.0',
+    waitCap: '0.0',
+    waitTotal: '0.0',
+  }
+
+  it('reads the five counts', () => {
+    expect(parseEnrollment(raw)).toEqual({
+      cap: 30,
+      enrolled: 10,
+      seatsAvailable: 20,
+      waitCap: 0,
+      waitTotal: 0,
+    })
+  })
+
+  it('accepts negative seats available, because the feed publishes them', () => {
+    // 431 rows are negative, down to -104. Clamping to zero would report a
+    // full section as merely full, losing how far past its cap it is.
+    expect(parseEnrollment({ ...raw, seatsAvailable: '-104.0' }).seatsAvailable).toBe(-104)
+  })
+
+  it('accepts enrolment above the cap without complaint', () => {
+    // 375 rows do this. Reserved capacity and permission overrides produce it
+    // legitimately; refusing it would reject real sections.
+    expect(() => parseEnrollment({ ...raw, cap: '10.0', enrolled: '30.0' })).not.toThrow()
+  })
+
+  it('does not require the three numbers to reconcile', () => {
+    // cap - enrolled === seatsAvailable fails in 1,048 rows. Each column is a
+    // separate thing KU published, snapshot at its own moment.
+    const odd = parseEnrollment({ ...raw, cap: '30.0', enrolled: '10.0', seatsAvailable: '5.0' })
+    expect(odd).toMatchObject({ cap: 30, enrolled: 10, seatsAvailable: 5 })
+  })
+
+  it('refuses a negative count in the fields that cannot be negative', () => {
+    expect(() => parseEnrollment({ ...raw, cap: '-1.0' })).toThrow(/enrollment cap is negative/)
+    expect(() => parseEnrollment({ ...raw, enrolled: '-1.0' })).toThrow(/total enrolled is negative/)
+    expect(() => parseEnrollment({ ...raw, waitTotal: '-1.0' })).toThrow(
+      /waitlist total is negative/,
+    )
+  })
+
+  it('refuses a fractional headcount', () => {
+    expect(() => parseEnrollment({ ...raw, enrolled: '10.5' })).toThrow(
+      /total enrolled is not an integer/,
+    )
+  })
+
+  it('names the column it rejected, since all five look alike', () => {
+    expect(() => parseEnrollment({ ...raw, waitCap: 'x' })).toThrow(/waitlist cap/)
   })
 })
