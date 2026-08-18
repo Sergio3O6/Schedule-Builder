@@ -2,10 +2,20 @@ node_modules/
 dist/
 coverage/
 
-# Crawler cache: regenerable from classes.ku.edu, and large. The normalized
-# bundles under data/bundles/ ARE committed — CI cannot regenerate them without
-# hitting KU's servers, and a static deploy has no build-time fetch step.
+# Generated data, both stages of it.
+#
+# data/raw/ is the crawler's cache: 1.9MB per term, regenerable from
+# classes.ku.edu, and never worth a git object.
+#
+# public/bundles/ is the normalizer's output: 275 files, 9.3MB, rebuilt from
+# the cache by `npm run normalize -- --term=4269`. The plan committed these on
+# the grounds that CI cannot regenerate them without hitting KU and a static
+# deploy has no build-time fetch step. Neither applies — this is not being
+# deployed — so what was left is 9.3MB of derived JSON that churns 275 files on
+# every re-normalize and can be rebuilt in under two seconds. If a deploy ever
+# happens, this line is what to revisit.
 data/raw/
+public/bundles/
 
 *.local
 .DS_Store
