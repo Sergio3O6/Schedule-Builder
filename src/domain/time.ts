@@ -217,6 +217,24 @@ function parseMonthDay(raw: string): MonthDay {
   return { month, day }
 }
 
+/**
+ * A Begin/End cell reconstructed against a year you supply.
+ *
+ * Every other date path infers the year from a TermCalendar, which is the right
+ * default and cannot serve the one case that has to come first: deriving the
+ * calendar itself. The normalizer reads the term's modal Begin/End out of the
+ * export to fix the epoch, and at that moment there is no calendar to infer
+ * against — so the caller states the year and takes responsibility for it.
+ *
+ * Deliberately not a general-purpose entry point. Using it anywhere a calendar
+ * exists reintroduces exactly the year-guessing that parseDateRange centralises,
+ * including the AUG-13..MAY-26 wrap it exists to handle.
+ */
+export function monthDayToIso(raw: string, year: number): IsoDate {
+  const { month, day } = parseMonthDay(raw)
+  return iso(year, month, day)
+}
+
 const iso = (year: number, month: number, day: number): IsoDate =>
   isoDate(`${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`)
 
