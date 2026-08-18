@@ -3,6 +3,7 @@ import {
   classNbr,
   combSectId,
   courseKey,
+  sectionNumber,
   splitCourseKey,
   subjectCode,
   termCode,
@@ -159,5 +160,38 @@ describe('unitId', () => {
     expect(unitId(termCode('4269'), classNbr('17939'))).not.toBe(
       unitId(termCode('4259'), classNbr('17939')),
     )
+  })
+})
+
+describe('sectionNumber', () => {
+  it('keeps the leading zeros the export really publishes', () => {
+    // Sixteen live rows start with a zero — ENGL 101 runs '0025' through '0950'
+    // and HEIM 567 is '0002'. Number('0025') is 25, which is not the label KU
+    // printed and not what the student sees on their enrolment page.
+    expect(sectionNumber('0025')).toBe('0025')
+    expect(sectionNumber('0002')).toBe('0002')
+    expect(sectionNumber('0950')).toBe('0950')
+  })
+
+  it('accepts every length the export uses', () => {
+    // Measured: lengths 1, 3 and 4. AEC 30 numbers its sections '1'.
+    for (const s of ['1', '100', '1000']) expect(sectionNumber(s)).toBe(s)
+  })
+
+  it('treats a blank label as absent rather than as an empty string', () => {
+    // 25 rows publish no Sec. nbr. An empty string would be a section whose
+    // label is the empty label, which is a different claim from having none.
+    expect(sectionNumber('')).toBeNull()
+    expect(sectionNumber('   ')).toBeNull()
+  })
+
+  it('trims the padding the export puts on its cells', () => {
+    expect(sectionNumber(' 1000 ')).toBe('1000')
+  })
+
+  it('rejects anything a label must never carry', () => {
+    for (const bad of ['10 00', '1|0', '../x', '10.0', '-5', 'a01', '1234567']) {
+      expect(() => sectionNumber(bad), bad).toThrow(/malformed section number/)
+    }
   })
 })

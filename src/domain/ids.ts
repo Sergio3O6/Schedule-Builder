@@ -32,6 +32,8 @@ export type CourseKey = Brand<string, 'CourseKey'>
 export type ClassNbr = Brand<number, 'ClassNbr'>
 /** Cross-listing group id. Never zero — absence is null. */
 export type CombSectId = Brand<number, 'CombSectId'>
+/** The `Sec. nbr` label within a course, e.g. "1000". A string, never a number. */
+export type SectionNumber = Brand<string, 'SectionNumber'>
 /** A registerable unit, the solver's alphabet. */
 export type UnitId = Brand<string, 'UnitId'>
 
@@ -154,6 +156,33 @@ export function combSectId(raw: string): CombSectId | null {
     throw new Error(`combined section id must be positive: ${JSON.stringify(raw)}`)
   }
   return value as CombSectId
+}
+
+/**
+ * Section numbers are strings, and the leading zeros are the reason.
+ *
+ * Measured across all 17,338 rows: 777 distinct values, all digits, lengths 1,
+ * 3 and 4, and 16 of them begin with a zero — ENGL 101 alone runs '0025',
+ * '0050', '0075' through '0950', and HEIM 567 has '0002'. Number('0025') is 25,
+ * which collides with nothing today but is not the label KU printed and is not
+ * what a student sees on their enrolment page.
+ *
+ * Letters are allowed although none occur. PeopleSoft permits them, and this
+ * value is a label rather than an identity — nothing joins on it — so a
+ * normalizer that threw on the first 'A01' would turn one unfamiliar section
+ * into a dead subject for no benefit. The pattern still refuses whitespace and
+ * separators, which is what a label must never carry.
+ */
+const SECTION_NUMBER_PATTERN = /^[0-9A-Z]{1,6}$/
+
+/** The section label, or null for the 25 rows that publish none. */
+export function sectionNumber(raw: string): SectionNumber | null {
+  const value = raw.trim()
+  if (value === '') return null
+  if (!SECTION_NUMBER_PATTERN.test(value)) {
+    throw new Error(`malformed section number: ${JSON.stringify(raw)}`)
+  }
+  return value as SectionNumber
 }
 
 /**
