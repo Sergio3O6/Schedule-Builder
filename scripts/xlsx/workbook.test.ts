@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { deflateRawSync } from 'node:zlib'
+import { crc32, deflateRawSync } from 'node:zlib'
 import {
   parseSharedStrings,
   parseSheet,
@@ -315,6 +315,10 @@ function buildZip(
     store?: boolean
     method?: number
     declaredSize?: number
+    /** Override the CRC-32, to build an archive that is corrupt on purpose. */
+    crc?: number
+    /** Override the declared uncompressed size, likewise. */
+    declaredUncompressedSize?: number
   }[],
 ): Uint8Array {
   const chunks: Uint8Array[] = []
@@ -325,14 +329,17 @@ function buildZip(
     const method = file.method ?? (file.store ? 0 : 8)
     const payload = method === 8 ? new Uint8Array(deflateRawSync(file.data)) : file.data
     const declared = file.declaredSize ?? payload.length
+    const crc = file.crc ?? crc32(file.data)
+    const uncompressed = file.declaredUncompressedSize ?? file.data.length
     const name = new TextEncoder().encode(file.name)
 
     const local = new Uint8Array(30 + name.length)
     const lv = new DataView(local.buffer)
     lv.setUint32(0, 0x04034b50, true)
     lv.setUint16(8, method, true)
+    lv.setUint32(14, crc, true)
     lv.setUint32(18, declared, true)
-    lv.setUint32(22, file.data.length, true)
+    lv.setUint32(22, uncompressed, true)
     lv.setUint16(26, name.length, true)
     local.set(name, 30)
 
@@ -340,8 +347,9 @@ function buildZip(
     const cv = new DataView(entry.buffer)
     cv.setUint32(0, 0x02014b50, true)
     cv.setUint16(10, method, true)
+    cv.setUint32(16, crc, true)
     cv.setUint32(20, declared, true)
-    cv.setUint32(24, file.data.length, true)
+    cv.setUint32(24, uncompressed, true)
     cv.setUint16(28, name.length, true)
     cv.setUint32(42, offset, true)
     entry.set(name, 46)
@@ -369,3 +377,72 @@ function buildZip(
   }
   return out
 }
+
+describe('member integrity', () => {
+  const hello = new TextEncoder().encode('hello world')
+
+  it('accepts a member whose checksum matches', () => {
+    const zip = buildZip([{ name: 'a.txt', data: hello }])
+    const member = readZipEntries(zip).get('a.txt')
+    expect(new TextDecoder().decode(member)).toBe('hello world')
+  })
+
+  it('refuses a member whose checksum does not match', () => {
+    // The archive carries the answer eight bytes from the compressed size the
+    // reader was already using. Not checking it meant a corrupt file read as a
+    // plausible one.
+    const zip = buildZip([{ name: 'a.txt', data: hello, crc: 0x12345678 }])
+    expect(() => readZipEntries(zip)).toThrow(/a\.txt failed its checksum/)
+  })
+
+  it('says the file is corrupt rather than unexpected', () => {
+    // The distinction matters operationally: an unexpected file is something to
+    // reconcile, a corrupt one is something to delete and re-fetch.
+    const zip = buildZip([{ name: 'a.txt', data: hello, crc: 1 }])
+    expect(() => readZipEntries(zip)).toThrow(/the file is corrupt, not merely unexpected/)
+  })
+
+  it('catches a single flipped bit inside a deflate stream', () => {
+    // This is the failure that motivated the check. A deflate stream stays
+    // decodable under most single-bit damage, so inflate succeeds and returns a
+    // different document: "Location" comes back "LocatLon" with no complaint.
+    const data = new TextEncoder().encode('Location'.repeat(64))
+    const zip = buildZip([{ name: 'a.txt', data }])
+    const flipped = zip.slice()
+
+    // Find a bit whose flip still inflates, then prove the CRC rejects it.
+    let corrupted = false
+    for (let i = 34; i < flipped.length - 22 && !corrupted; i += 1) {
+      for (let bit = 0; bit < 8; bit += 1) {
+        const candidate = flipped.slice()
+        const byte = candidate[i]
+        if (byte === undefined) continue
+        candidate[i] = byte ^ (1 << bit)
+        try {
+          readZipEntries(candidate)
+        } catch (error) {
+          if (!/failed its checksum/.test((error as Error).message)) continue
+          corrupted = true
+          break
+        }
+      }
+    }
+    expect(corrupted).toBe(true)
+  })
+
+  it('refuses a member that unpacks to the wrong length', () => {
+    // Cheaper than the CRC and far more legible when the cause is truncation.
+    const zip = buildZip([{ name: 'a.txt', data: hello, declaredUncompressedSize: 5 }])
+    expect(() => readZipEntries(zip)).toThrow(/unpacked to 11 bytes, but the archive declares 5/)
+  })
+
+  it('checks a stored member too, which has no other structural guard', () => {
+    const zip = buildZip([{ name: 'a.txt', data: hello, store: true, crc: 0 }])
+    expect(() => readZipEntries(zip)).toThrow(/failed its checksum/)
+  })
+
+  it('passes the real export unchanged', async () => {
+    const bytes = await eecs()
+    expect(() => readZipEntries(bytes)).not.toThrow()
+  })
+})

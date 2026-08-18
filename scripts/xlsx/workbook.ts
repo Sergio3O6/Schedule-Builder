@@ -13,7 +13,7 @@
  * this project: it produces schedules that look plausible and are wrong.
  */
 
-import { inflateRawSync } from 'node:zlib'
+import { crc32, inflateRawSync } from 'node:zlib'
 
 /** One row, keyed by column letter: "A" -> "EECS". Absent cells are absent. */
 export type SheetRow = ReadonlyMap<string, string>
@@ -98,7 +98,9 @@ export function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     }
 
     const method = view.getUint16(cursor + 10, true)
+    const expectedCrc = view.getUint32(cursor + 16, true)
     const compressedSize = view.getUint32(cursor + 20, true)
+    const uncompressedSize = view.getUint32(cursor + 24, true)
     const nameLength = view.getUint16(cursor + 28, true)
     const extraLength = view.getUint16(cursor + 30, true)
     const commentLength = view.getUint16(cursor + 32, true)
@@ -116,7 +118,17 @@ export function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     // check in readWorkbook and be read instead of the real one.
     if (entries.has(name)) throw new Error(`duplicate zip member: ${name}`)
 
-    entries.set(name, readMember(bytes, view, localHeaderOffset, method, compressedSize, name))
+    entries.set(
+      name,
+      readMember(bytes, view, {
+        offset: localHeaderOffset,
+        method,
+        compressedSize,
+        uncompressedSize,
+        expectedCrc,
+        name,
+      }),
+    )
     cursor += CENTRAL_DIR_ENTRY_MIN_SIZE + nameLength + extraLength + commentLength
   }
 
@@ -141,14 +153,19 @@ function findEndOfCentralDirectory(view: DataView, length: number): number {
   throw new Error('not a zip archive: no end-of-central-directory record found')
 }
 
-function readMember(
-  bytes: Uint8Array,
-  view: DataView,
-  offset: number,
-  method: number,
-  compressedSize: number,
-  name: string,
-): Uint8Array {
+/** What the central directory says about one member. */
+interface MemberHeader {
+  readonly offset: number
+  readonly method: number
+  readonly compressedSize: number
+  readonly uncompressedSize: number
+  readonly expectedCrc: number
+  readonly name: string
+}
+
+function readMember(bytes: Uint8Array, view: DataView, header: MemberHeader): Uint8Array {
+  const { offset, method, compressedSize, name } = header
+
   if (offset + LOCAL_HEADER_MIN_SIZE > bytes.byteLength) {
     throw new Error(`truncated local header for ${name}`)
   }
@@ -175,11 +192,58 @@ function readMember(
   }
   const payload = bytes.subarray(start, start + compressedSize)
 
+  const content = decompress(payload, method, name)
+  verifyIntegrity(content, header)
+  return content
+}
+
+function decompress(payload: Uint8Array, method: number, name: string): Uint8Array {
   if (method === STORED) return payload
   if (method === DEFLATED) {
     return new Uint8Array(inflateRawSync(payload, { maxOutputLength: MAX_MEMBER_BYTES }))
   }
   throw new Error(`unsupported compression method ${method} for ${name}`)
+}
+
+/**
+ * The check that makes a corrupted export loud instead of plausible.
+ *
+ * Every other guard in this reader is structural: it establishes that the bytes
+ * are shaped like an archive. None of them says the bytes are the ones the
+ * writer produced. Inflate is not that check either — a deflate stream stays
+ * decodable under most single-bit damage, so a flipped bit inside it yields a
+ * shorter, longer or simply different document with no complaint, and a cell
+ * reading "Location" comes back "LocatLon".
+ *
+ * That failure is uniquely bad here because the export is cached on disk and
+ * re-read on every run, so one corrupt byte silently poisons every schedule
+ * built from it, indefinitely. The archive already carries the answer: a CRC-32
+ * and an uncompressed length sit in the central directory, eight and four bytes
+ * from the compressed size this reader was already using.
+ *
+ * The length is checked as well as the CRC. It costs nothing, it catches the
+ * truncation cases a CRC would also catch but reports them far more legibly,
+ * and it is the only check a STORED member gets from its own structure.
+ */
+function verifyIntegrity(content: Uint8Array, header: MemberHeader): void {
+  const { uncompressedSize, expectedCrc, name } = header
+
+  if (content.byteLength !== uncompressedSize) {
+    throw new Error(
+      `member ${name} unpacked to ${content.byteLength} bytes, but the archive ` +
+        `declares ${uncompressedSize}`,
+    )
+  }
+
+  // crc32 returns an unsigned 32-bit value, matching the field's encoding.
+  const actual = crc32(content)
+  if (actual !== expectedCrc) {
+    throw new Error(
+      `member ${name} failed its checksum: the archive declares ` +
+        `${expectedCrc.toString(16).padStart(8, '0')} and the content is ` +
+        `${actual.toString(16).padStart(8, '0')} — the file is corrupt, not merely unexpected`,
+    )
+  }
 }
 
 const ENTITIES: Record<string, string> = {
