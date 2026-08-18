@@ -1,11 +1,11 @@
 /**
  * The attributes of one section, and the parsers that read them.
  *
- * Three shapes live here, and each is shaped by something the data does rather
- * than by what the column name suggests: vocabularies that are open because KU
- * extends them, a credit range because half the catalogue does not have a
- * single credit value, and seat counts that are recorded rather than reconciled
- * because they contradict each other.
+ * Every shape here is decided by what the data does rather than by what the
+ * column name suggests: vocabularies that are open because KU extends them, a
+ * credit range because half the catalogue has no single credit value, seat
+ * counts recorded rather than reconciled because they contradict each other,
+ * and a Section keyed on Class nbr because a section is not a row.
  *
  * ## Open vocabularies
  *
@@ -28,7 +28,10 @@
  * that says nothing while reporting success.
  */
 
+import { anyMeetingConflicts } from './meeting.ts'
 import { parseDecimal, parseIntegral } from './number.ts'
+import type { ClassNbr, CombSectId, CourseKey, SectionNumber } from './ids.ts'
+import type { ScheduledMeeting, UnscheduledMeeting } from './meeting.ts'
 
 /**
  * All 16 component codes in the Fall 2026 export, with live row counts:
@@ -236,4 +239,99 @@ export function parseEnrollment(raw: RawEnrollment): Enrollment {
     waitCap: count(raw.waitCap, 'waitlist cap'),
     waitTotal: count(raw.waitTotal, 'waitlist total'),
   }
+}
+
+/**
+ * Free text as the export publishes it, cleaned only where it is broken.
+ *
+ * Two repairs, each earned by something in the file. A zero-width space
+ * (U+200B) sits inside GEOL 591's topic, between 'Quantitat' and 'ive' — the
+ * only non-ASCII character in all 17,338 rows. It is invisible, and it defeats
+ * any search for 'Quantitative'. And 59 titles carry a run of internal spaces,
+ * which is a formatting artefact of a field the feed truncates to 30 characters.
+ *
+ * Nothing else is touched. Case, punctuation and abbreviation are KU's to
+ * choose, and a normalizer that improved them would be inventing course names.
+ */
+const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g
+
+function cleanText(raw: string): string {
+  return raw.replace(ZERO_WIDTH, '').replace(/\s+/g, ' ').trim()
+}
+
+/** The course title. Never blank in any of the 17,338 rows, so a blank throws. */
+export function parseTitle(raw: string): string {
+  const value = cleanText(raw)
+  if (value === '') throw new Error('course title is blank')
+  return value
+}
+
+/** The topic of a topics course, or null. 764 rows carry one, 449 distinct. */
+export function parseTopic(raw: string): string | null {
+  const value = cleanText(raw)
+  return value === '' ? null : value
+}
+
+/**
+ * One section: everything KU publishes about a single thing on the timetable.
+ *
+ * A section is one `Class nbr`, which is not one row. 588 class numbers span
+ * two to ten rows each, 1,912 rows in total — most of them a second meeting
+ * pattern (a lecture that meets MWF and also Th), some of them exact
+ * duplicates. Every one of the eleven identity columns agrees across the rows
+ * of a class number, with zero exceptions across the export, so assembling a
+ * section means taking those fields from any row and unioning the meetings.
+ *
+ * A naive dedupe by row would destroy the 459 genuine extra patterns; keying on
+ * `Class nbr` keeps them, and it is what a student is enrolling in anyway.
+ *
+ * The two meeting arrays are separate rather than one `Meeting[]` so that
+ * conflict code can take `readonly ScheduledMeeting[]` and be structurally
+ * unable to receive a TBA section. An empty `scheduled` is the honest, correct
+ * representation of a section that conflicts with nothing.
+ */
+export interface Section {
+  readonly classNbr: ClassNbr
+  readonly courseKey: CourseKey
+  /** The Sec. nbr label, or null for the 25 rows that publish none. */
+  readonly number: SectionNumber | null
+  readonly title: string
+  readonly topic: string | null
+  readonly component: Component
+  readonly career: Career
+  readonly consent: Consent
+  readonly credits: Credits
+  /** False for 432 rows — mostly parent lectures enrolled through a child. */
+  readonly enrollable: boolean
+  /** The cross-listing group, or null when the section is not combined. */
+  readonly combSectId: CombSectId | null
+  readonly enrollment: Enrollment
+  /**
+   * Always empty, and kept anyway.
+   *
+   * The Instructor column is blank in 100% of rows here and in Fall 2025, a
+   * term that has already finished — so this is CAS gating, not staff who have
+   * yet to be assigned. The anonymous feed will never populate it; the HTML
+   * view renders a login link in its place.
+   *
+   * `[]` is a truthful value rather than a placeholder, so no consumer can
+   * mistake missing data for real data. Keeping the field makes an
+   * authenticated ingest a populate-only change instead of a schema migration
+   * through the wire format, the loader and every fixture.
+   */
+  readonly instructors: readonly string[]
+  readonly scheduled: readonly ScheduledMeeting[]
+  readonly unscheduled: readonly UnscheduledMeeting[]
+}
+
+/**
+ * Do two sections collide?
+ *
+ * Reaches only for the scheduled arrays, so a section with nothing scheduled is
+ * naturally free of conflicts and needs no special case. This is the altitude
+ * callers actually work at — asking them to reach into `.scheduled` themselves
+ * is asking them to remember which array is the safe one.
+ */
+export function sectionsConflict(a: Section, b: Section): boolean {
+  return anyMeetingConflicts(a.scheduled, b.scheduled)
 }

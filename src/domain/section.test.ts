@@ -10,8 +10,16 @@ import {
   parseCredits,
   parseEnrollable,
   parseEnrollment,
+  parseTitle,
+  parseTopic,
+  sectionsConflict,
   vocabularyLabel,
 } from './section.ts'
+import type { Section } from './section.ts'
+import { classNbr, courseKey, sectionNumber, termCode } from './ids.ts'
+import { classifyMeeting } from './meeting.ts'
+import type { ScheduledMeeting } from './meeting.ts'
+import { dateSpan, parseClockTime, parseDayMask, termCalendar } from './time.ts'
 
 describe('the measured alphabets', () => {
   it('carries every component code the full term contains', () => {
@@ -231,5 +239,105 @@ describe('parseEnrollment', () => {
 
   it('names the column it rejected, since all five look alike', () => {
     expect(() => parseEnrollment({ ...raw, waitCap: 'x' })).toThrow(/waitlist cap/)
+  })
+})
+
+describe('parseTitle and parseTopic', () => {
+  it('reads a title through unchanged', () => {
+    expect(parseTitle('Arabic and Islamic Studies')).toBe('Arabic and Islamic Studies')
+  })
+
+  it('strips the zero-width space hiding in the one non-ASCII cell', () => {
+    // GEOL 591's topic has U+200B between 'Quantitat' and 'ive' — the only
+    // non-ASCII character in all 17,338 rows. It is invisible on screen and it
+    // defeats any search for 'Quantitative'.
+    expect(parseTopic('Quantitat\u200Bive Geosci for Grads')).toBe('Quantitative Geosci for Grads')
+  })
+
+  it('collapses the runs of internal spaces 59 titles carry', () => {
+    expect(parseTitle('Intro  to   Biology')).toBe('Intro to Biology')
+  })
+
+  it('leaves case, punctuation and abbreviation alone', () => {
+    // The feed truncates titles to 30 characters, so they are already
+    // abbreviations. Improving them would be inventing course names.
+    expect(parseTitle('Intro Comp Sci & Prog I')).toBe('Intro Comp Sci & Prog I')
+  })
+
+  it('treats a blank topic as absent', () => {
+    expect(parseTopic('')).toBeNull()
+    expect(parseTopic('  \u200B ')).toBeNull()
+  })
+
+  it('refuses a blank title, which never occurs in the export', () => {
+    expect(() => parseTitle('   ')).toThrow(/course title is blank/)
+  })
+})
+
+describe('sectionsConflict', () => {
+  const fall = termCalendar(termCode('4269'), '2026-08-24', '2026-12-18')
+  const scheduled = (days: string, start: string, end: string): ScheduledMeeting => {
+    const m = classifyMeeting({
+      days: parseDayMask(days),
+      start: parseClockTime(start),
+      end: parseClockTime(end),
+      rawStart: start,
+      span: dateSpan(fall, 'AUG-24', 'DEC-18'),
+      place: { campus: 'LAWRENCE', room: null },
+    })
+    if (m.kind !== 'scheduled') throw new Error('fixture is not scheduled')
+    return m
+  }
+
+  const section = (meetings: readonly ScheduledMeeting[]): Section => ({
+    classNbr: classNbr('17939'),
+    courseKey: courseKey('EECS', ' 168'),
+    number: sectionNumber('1000'),
+    title: 'Programming I',
+    topic: null,
+    component: parseComponent('LEC'),
+    career: parseCareer('UGDL'),
+    consent: parseConsent('None'),
+    credits: parseCredits('4.0', '4.0'),
+    enrollable: true,
+    combSectId: null,
+    enrollment: parseEnrollment({
+      cap: '30.0',
+      enrolled: '10.0',
+      seatsAvailable: '20.0',
+      waitCap: '0.0',
+      waitTotal: '0.0',
+    }),
+    instructors: [],
+    scheduled: meetings,
+    unscheduled: [],
+  })
+
+  it('reports a collision between overlapping meetings', () => {
+    const a = section([scheduled('MWF', '09:00 AM', '09:50 AM')])
+    const b = section([scheduled('MWF', '09:30 AM', '10:20 AM')])
+    expect(sectionsConflict(a, b)).toBe(true)
+  })
+
+  it('lets back-to-back classes stand', () => {
+    const a = section([scheduled('MWF', '09:00 AM', '09:50 AM')])
+    const b = section([scheduled('MWF', '09:50 AM', '10:40 AM')])
+    expect(sectionsConflict(a, b)).toBe(false)
+  })
+
+  it('checks every meeting pattern, not just the first', () => {
+    // 459 class numbers carry a genuine second pattern — a lecture that meets
+    // MWF and also Th. Comparing only the first would miss half of them.
+    const a = section([scheduled('MWF', '09:00 AM', '09:50 AM'), scheduled('Th', '02:00 PM', '03:50 PM')])
+    const b = section([scheduled('Th', '03:00 PM', '04:00 PM')])
+    expect(sectionsConflict(a, b)).toBe(true)
+  })
+
+  it('makes a section with nothing scheduled conflict with nothing', () => {
+    // No special case required: the empty array is the correct representation,
+    // and 7,746 rows across the term need it.
+    const tba = section([])
+    expect(sectionsConflict(tba, section([scheduled('MWF', '09:00 AM', '09:50 AM')]))).toBe(false)
+    expect(sectionsConflict(tba, tba)).toBe(false)
   })
 })
