@@ -1,46 +1,78 @@
 /**
- * The first thing that puts real data on screen.
+ * Search, select, and see the sections of what was selected.
  *
- * One subject, listed. No selection, no solver, no calendar — those are the
- * next commits, and each of them is easier to judge against something visible
- * than against a description. What this proves is that the whole pipeline
- * lines up end to end: a crawl of KU's export, a normalizer, a bundle on disk,
- * and a loader that agrees with all three.
+ * The catalogue is never listed. 4,412 courses is not a browsing experience,
+ * and a student arrives knowing what they want — so nothing is shown until
+ * something is typed, and a course's sections appear only once it is picked.
+ *
+ * Bundles load per subject, on demand, when a course from that subject is
+ * selected. The index that search reads is the only thing fetched up front.
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { loadCatalog } from './data/catalog.ts'
 import { loadSubject } from './data/bundle.ts'
-import { subjectCode, termCode } from './domain/ids.ts'
-import { groupByCourse } from './ui/courses.ts'
+import { splitCourseKey, termCode } from './domain/ids.ts'
 import { vocabularyLabel } from './domain/section.ts'
+import { countMatches, searchCourses } from './ui/search.ts'
 import { describeUnscheduled, formatCredits } from './ui/format.ts'
+import type { Catalog, CourseEntry } from './data/catalog.ts'
 import type { SubjectBundle } from './data/bundle.ts'
+import type { CourseKey, SubjectCode } from './domain/ids.ts'
 import type { Section } from './domain/section.ts'
 import './ui/app.css'
 
-/** Hard-coded until there is a subject picker. One term, one subject. */
+/** Hard-coded until there is a term picker. */
 const TERM = termCode('4269')
-const SUBJECT = subjectCode('EECS')
 
-type State =
-  | { readonly kind: 'loading' }
-  | { readonly kind: 'ready'; readonly bundle: SubjectBundle }
-  | { readonly kind: 'failed'; readonly message: string }
+export interface Loaders {
+  readonly catalog: typeof loadCatalog
+  readonly subject: typeof loadSubject
+}
 
-function MeetingList({ section }: { section: Section }) {
-  const meetings = [...section.scheduled, ...section.unscheduled]
+const DEFAULT_LOADERS: Loaders = { catalog: loadCatalog, subject: loadSubject }
+
+function SearchResults({
+  matches,
+  total,
+  selected,
+  onPick,
+}: {
+  matches: readonly CourseEntry[]
+  total: number
+  selected: ReadonlySet<CourseKey>
+  onPick: (course: CourseEntry) => void
+}) {
+  if (matches.length === 0) return <p className="status">No course matches that.</p>
+
   return (
-    <ul className="meetings">
-      {meetings.map((meeting, index) => (
-        <li key={index} className={meeting.kind === 'scheduled' ? 'meeting' : 'meeting unscheduled'}>
-          {describeUnscheduled(meeting)}
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="results">
+        {matches.map((course) => (
+          <li key={course.key}>
+            <button type="button" onClick={() => onPick(course)} disabled={selected.has(course.key)}>
+              <span className="result-code">
+                {course.subject} {course.number}
+              </span>
+              <span className="result-title">{course.title}</span>
+              <span className="result-count">
+                {course.sectionCount} {course.sectionCount === 1 ? 'section' : 'sections'}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {total > matches.length && (
+        <p className="status">
+          {total - matches.length} more match — keep typing to narrow it down.
+        </p>
+      )}
+    </>
   )
 }
 
 function SectionRow({ section }: { section: Section }) {
+  const meetings = [...section.scheduled, ...section.unscheduled]
   return (
     <li className="section">
       <div className="section-head">
@@ -52,78 +84,162 @@ function SectionRow({ section }: { section: Section }) {
           <span className="section-flag">{section.consent.code} consent</span>
         )}
       </div>
-      <MeetingList section={section} />
+      <ul className="meetings">
+        {meetings.map((meeting, index) => (
+          <li
+            key={index}
+            className={meeting.kind === 'scheduled' ? 'meeting' : 'meeting unscheduled'}
+          >
+            {describeUnscheduled(meeting)}
+          </li>
+        ))}
+      </ul>
     </li>
   )
 }
 
-/** Injected so tests need neither a network nor a generated bundle on disk. */
-export type LoadSubject = typeof loadSubject
+function SelectedCourse({
+  course,
+  sections,
+  onRemove,
+}: {
+  course: CourseEntry
+  sections: readonly Section[] | undefined
+  onRemove: () => void
+}) {
+  return (
+    <li className="course">
+      <div className="course-head">
+        <h2>
+          {course.subject} {course.number}
+        </h2>
+        <button type="button" className="remove" onClick={onRemove}>
+          Remove
+        </button>
+      </div>
+      <p className="course-title">{course.title}</p>
+      {sections === undefined ? (
+        <p className="status">Loading sections…</p>
+      ) : (
+        <ol className="sections">
+          {sections.map((section) => (
+            <SectionRow key={section.classNbr} section={section} />
+          ))}
+        </ol>
+      )}
+    </li>
+  )
+}
 
-export function App({ load = loadSubject }: { load?: LoadSubject } = {}) {
-  const [state, setState] = useState<State>({ kind: 'loading' })
+export function App({ loaders = DEFAULT_LOADERS }: { loaders?: Loaders } = {}) {
+  const [catalog, setCatalog] = useState<Catalog | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [picked, setPicked] = useState<readonly CourseEntry[]>([])
+  const [bundles, setBundles] = useState<ReadonlyMap<SubjectCode, SubjectBundle>>(new Map())
 
   useEffect(() => {
-    // Guarded because StrictMode runs effects twice in development, and because
-    // a slow load that resolves after unmount would otherwise set state on a
-    // component nobody is looking at.
     let cancelled = false
-    load(TERM, SUBJECT).then(
-      (bundle) => {
-        if (!cancelled) setState({ kind: 'ready', bundle })
+    loaders.catalog(TERM).then(
+      (loaded) => {
+        if (!cancelled) setCatalog(loaded)
       },
-      (error: unknown) => {
-        if (!cancelled) {
-          setState({ kind: 'failed', message: error instanceof Error ? error.message : String(error) })
-        }
+      (failure: unknown) => {
+        if (!cancelled) setError(failure instanceof Error ? failure.message : String(failure))
       },
     )
     return () => {
       cancelled = true
     }
-  }, [load])
+  }, [loaders])
+
+  const pick = useCallback(
+    (course: CourseEntry) => {
+      setPicked((current) =>
+        current.some((c) => c.key === course.key) ? current : [...current, course],
+      )
+      setQuery('')
+
+      // Fetch the subject's bundle the first time one of its courses is
+      // picked. Selecting a second course from the same subject costs no
+      // request, which is why bundles are keyed on subject rather than course.
+      const subject = course.subject
+      setBundles((current) => {
+        if (current.has(subject)) return current
+        loaders.subject(TERM, subject).then(
+          (bundle) => setBundles((next) => new Map(next).set(subject, bundle)),
+          (failure: unknown) =>
+            setError(failure instanceof Error ? failure.message : String(failure)),
+        )
+        return current
+      })
+    },
+    [loaders],
+  )
+
+  const sectionsFor = (key: CourseKey): readonly Section[] | undefined => {
+    const bundle = bundles.get(splitCourseKey(key).subject)
+    return bundle?.sections.filter((section) => section.courseKey === key)
+  }
+
+  if (error !== null) {
+    return (
+      <main>
+        <h1>KU Schedule Builder</h1>
+        <div className="status error">
+          <p>{error}</p>
+          <p>
+            Data is generated, not committed. Run <code>npm run normalize -- --term={TERM}</code>{' '}
+            first.
+          </p>
+        </div>
+      </main>
+    )
+  }
 
   return (
     <main>
       <h1>KU Schedule Builder</h1>
-      {state.kind === 'loading' && <p className="status">Loading {SUBJECT}…</p>}
-      {state.kind === 'failed' && (
-        <div className="status error">
-          <p>{state.message}</p>
-          <p>
-            Bundles are generated, not committed. Run{' '}
-            <code>npm run normalize -- --term={TERM}</code> first.
-          </p>
-        </div>
-      )}
-      {state.kind === 'ready' && <SubjectListing bundle={state.bundle} />}
-    </main>
-  )
-}
 
-function SubjectListing({ bundle }: { bundle: SubjectBundle }) {
-  const courses = groupByCourse(bundle.sections)
-  return (
-    <>
-      <p className="status">
-        {bundle.subject} · {courses.length} courses · {bundle.sections.length} sections ·{' '}
-        {bundle.startDate} to {bundle.endDate}
-      </p>
-      <ol className="courses">
-        {courses.map((course) => (
-          <li key={course.key} className="course">
-            <h2>
-              {bundle.subject} {course.number}
-            </h2>
-            <p className="course-title">{course.sections[0]?.title}</p>
-            <ol className="sections">
-              {course.sections.map((section) => (
-                <SectionRow key={section.classNbr} section={section} />
-              ))}
-            </ol>
-          </li>
-        ))}
-      </ol>
-    </>
+      <label className="search">
+        <span>Add a course</span>
+        <input
+          type="search"
+          value={query}
+          placeholder="EECS 168, or calculus"
+          autoComplete="off"
+          disabled={catalog === null}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+
+      {catalog === null && <p className="status">Loading the course index…</p>}
+
+      {catalog !== null && query.trim() !== '' && (
+        <SearchResults
+          matches={searchCourses(catalog.courses, query)}
+          total={countMatches(catalog.courses, query)}
+          selected={new Set(picked.map((c) => c.key))}
+          onPick={pick}
+        />
+      )}
+
+      {picked.length === 0 ? (
+        <p className="status empty">
+          Nothing selected yet. Search above to add the courses you are considering.
+        </p>
+      ) : (
+        <ol className="courses">
+          {picked.map((course) => (
+            <SelectedCourse
+              key={course.key}
+              course={course}
+              sections={sectionsFor(course.key)}
+              onRemove={() => setPicked((current) => current.filter((c) => c.key !== course.key))}
+            />
+          ))}
+        </ol>
+      )}
+    </main>
   )
 }

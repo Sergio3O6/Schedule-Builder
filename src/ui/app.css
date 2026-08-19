@@ -109,3 +109,102 @@ h1 {
 code {
   font-size: 0.85em;
 }
+
+.search {
+  display: block;
+  margin: 1.5rem 0 1rem;
+}
+
+.search span {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.results {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.results button {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  cursor: pointer;
+}
+
+.results li:first-child button {
+  border-top: 0;
+}
+
+.results button:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.results button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.result-code {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.result-title {
+  flex: 1;
+  color: var(--muted);
+}
+
+.result-count {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.course-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.remove {
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.status.empty {
+  padding: 2rem 0;
+  border-top: 1px solid var(--rule);
+}
