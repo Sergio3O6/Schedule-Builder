@@ -9,6 +9,12 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
+    // The default 5s is enough for an ordinary run and not for an instrumented
+    // one. bundle.test.ts hashes the whole EECS export twice to prove the bytes
+    // are deterministic, and under v8 coverage that reliably runs past five
+    // seconds — which is why enabling the coverage gate needs this and not a
+    // change to the test. A slow test is not a failing one.
+    testTimeout: 30_000,
     coverage: {
       provider: 'v8',
       // Only the pure layers carry a coverage bar. UI tests are deliberately lighter,

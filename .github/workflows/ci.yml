@@ -17,13 +17,22 @@ jobs:
 
       - run: npm ci
 
-      # Kept as three separate steps so a red check names the failing gate
-      # directly instead of surfacing as one opaque "verify" failure.
+      # Kept as separate steps so a red check names the failing gate directly
+      # instead of surfacing as one opaque "verify" failure.
       - name: Typecheck
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
 
-      - name: Test
-        run: npm test
+      # Coverage rather than a bare test run: the 80% bar is configured in
+      # vite.config.ts, and a bar nothing runs is not a bar. This runs the whole
+      # suite too, so it replaces the plain test step rather than adding to it.
+      - name: Test and coverage
+        run: npm run coverage
+
+      # The app was never built in CI, so it could stop compiling while every
+      # check stayed green. Typecheck does not catch this: it passes on code
+      # that Vite still fails to bundle.
+      - name: Build
+        run: npm run build
