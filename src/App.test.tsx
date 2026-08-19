@@ -8,6 +8,7 @@ import { readWorkbook } from '../scripts/xlsx/workbook.ts'
 import { buildSections } from '../scripts/normalize/rows.ts'
 import { bundleSubject } from '../scripts/normalize/bundle.ts'
 import { buildCatalog, catalogBytes } from '../scripts/normalize/catalog.ts'
+import { makeSection, meets } from './testing/sections.ts'
 import type { Loaders } from './App'
 import type { Catalog } from './data/catalog.ts'
 import type { SubjectBundle } from './data/bundle.ts'
@@ -168,5 +169,115 @@ describe('App', () => {
     render(<App loaders={failing('boom')} />)
     expect(screen.getByRole('heading', { name: 'KU Schedule Builder' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
+  })
+})
+
+/**
+ * The schedule panel.
+ *
+ * The first three run against the real EECS export, so linkage, solving and
+ * ranking are all exercised on data KU actually published. The failures use
+ * synthetic bundles: a clash between two named courses is not something the
+ * live fixture can be relied on to contain, and pinning a test to one that
+ * does today makes it fail the next time KU reschedules something.
+ */
+describe('App schedules', () => {
+  const pick = async (query: string) => {
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: query } })
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(query) }))
+  }
+
+  const syntheticBundle = (sections: readonly Section[]): SubjectBundle => ({
+    term,
+    subject: eecs,
+    startDate: '2026-08-24',
+    endDate: '2026-12-18',
+    sections,
+  })
+
+  const syntheticCatalog = (keys: readonly string[]): Catalog => ({
+    term,
+    startDate: '2026-08-24',
+    endDate: '2026-12-18',
+    courses: keys.map((key) => ({
+      key: key as CourseKey,
+      subject: eecs,
+      number: key.slice(key.indexOf('|') + 1),
+      title: 'Synthetic',
+      sectionCount: 1,
+    })),
+  })
+
+  it('draws a week once a course is picked', async () => {
+    const { catalog, bundle } = await realData()
+    render(<App loaders={loaders(catalog, bundle)} />)
+    await screen.findByText(/Nothing selected yet/)
+
+    await pick('EECS 168')
+
+    expect(await screen.findByRole('region', { name: 'Weekly schedule' })).toBeInTheDocument()
+    expect(screen.getByText(/Schedule 1 of/)).toBeInTheDocument()
+  })
+
+  it('says what to register for, which is not everything it draws', async () => {
+    // A parent lecture is drawn on the grid but enrolled through its child, so
+    // the panel has to name the section a student actually signs up for.
+    const { catalog, bundle } = await realData()
+    render(<App loaders={loaders(catalog, bundle)} />)
+    await screen.findByText(/Nothing selected yet/)
+
+    await pick('EECS 168')
+
+    expect(await screen.findByText(/enroll in/)).toBeInTheDocument()
+  })
+
+  it('pages through the ranked schedules', async () => {
+    const { catalog, bundle } = await realData()
+    render(<App loaders={loaders(catalog, bundle)} />)
+    await screen.findByText(/Nothing selected yet/)
+
+    await pick('EECS 168')
+    await screen.findByText(/Schedule 1 of/)
+
+    // The first schedule is the best one, so Previous has nowhere to go.
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(await screen.findByText(/Schedule 2 of/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled()
+  })
+
+  it('names the two courses to blame instead of saying nothing works', async () => {
+    const clash = [
+      makeSection({
+        course: 'EECS 100',
+        classNbr: 1,
+        scheduled: [meets('MWF', '09:00 AM', '09:50 AM')],
+      }),
+      makeSection({
+        course: 'EECS 200',
+        classNbr: 2,
+        scheduled: [meets('MWF', '09:00 AM', '09:50 AM')],
+      }),
+    ]
+    render(
+      <App loaders={loaders(syntheticCatalog(['EECS|100', 'EECS|200']), syntheticBundle(clash))} />,
+    )
+    await screen.findByText(/Nothing selected yet/)
+
+    await pick('EECS 100')
+    await pick('EECS 200')
+
+    expect(await screen.findByText(/cannot be taken together/)).toBeInTheDocument()
+    expect(screen.getByText(/EECS 100 and EECS 200/)).toBeInTheDocument()
+  })
+
+  it('says a course has no sections rather than blaming a clash', async () => {
+    render(<App loaders={loaders(syntheticCatalog(['EECS|100']), syntheticBundle([]))} />)
+    await screen.findByText(/Nothing selected yet/)
+
+    await pick('EECS 100')
+
+    expect(await screen.findByText(/has no sections in this term/)).toBeInTheDocument()
   })
 })

@@ -326,3 +326,73 @@ code {
   padding: 0;
   color: var(--muted);
 }
+
+/* --- Generated schedules ------------------------------------------------- */
+
+.schedules {
+  margin: 0 0 2rem;
+}
+
+.schedule-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.schedule-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.schedule-nav button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+
+.schedule-nav button:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.schedule-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.schedule-count {
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.schedule-why {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.schedule-picks {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+.schedule-picks li {
+  padding: 0.15rem 0;
+}
+
+.schedule-enroll {
+  color: var(--muted);
+}
+
+.schedule-attached {
+  color: var(--flag);
+}

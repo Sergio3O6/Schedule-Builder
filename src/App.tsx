@@ -9,17 +9,23 @@
  * selected. The index that search reads is the only thing fetched up front.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { loadCatalog } from './data/catalog.ts'
 import { loadSubject } from './data/bundle.ts'
 import { splitCourseKey, termCode } from './domain/ids.ts'
 import { vocabularyLabel } from './domain/section.ts'
+import { courseUnits } from './domain/unit.ts'
+import { solveSchedules } from './domain/solve.ts'
+import { rankSchedules } from './domain/preferences.ts'
 import { countMatches, searchCourses } from './ui/search.ts'
-import { describeUnscheduled, formatCredits } from './ui/format.ts'
+import { describeUnscheduled, formatCredits, formatMinuteOfDay } from './ui/format.ts'
+import { WeekGrid } from './ui/WeekGrid.tsx'
 import type { Catalog, CourseEntry } from './data/catalog.ts'
 import type { SubjectBundle } from './data/bundle.ts'
 import type { CourseKey, SubjectCode } from './domain/ids.ts'
 import type { Section } from './domain/section.ts'
+import type { RankedSchedule } from './domain/preferences.ts'
+import type { CalendarSource } from './ui/calendar.ts'
 import './ui/app.css'
 
 /** Hard-coded until there is a term picker. */
@@ -131,6 +137,130 @@ function SelectedCourse({
   )
 }
 
+/** 'EECS 168' from a course key, for a grid block and a heading alike. */
+function courseLabel(key: CourseKey): string {
+  const { subject, number } = splitCourseKey(key)
+  return `${subject} ${number}`
+}
+
+/**
+ * Every section of every unit, as blocks for the grid.
+ *
+ * Keyed on the COURSE rather than the unit so that a lecture and its lab share
+ * one colour — they are one course to a student, and colouring them separately
+ * would imply they were separate choices.
+ */
+function sourcesFor(ranked: RankedSchedule): readonly CalendarSource[] {
+  return ranked.schedule.units.flatMap((unit) =>
+    unit.sections.map((section) => ({
+      id: unit.courseKey,
+      label: courseLabel(unit.courseKey),
+      section,
+    })),
+  )
+}
+
+/** 'Mon, Wed, Fri · 2h 10m of gaps · first class 9:00 AM'. */
+function describeShape(ranked: RankedSchedule): string {
+  const parts: string[] = []
+  const dayCount = ranked.shape.days.length
+  parts.push(`${dayCount} ${dayCount === 1 ? 'day' : 'days'} on campus`)
+
+  const gap = ranked.shape.gapMinutes
+  if (gap > 0) {
+    const hours = Math.floor(gap / 60)
+    const minutes = gap % 60
+    parts.push(`${hours > 0 ? `${hours}h ` : ''}${minutes}m between classes`)
+  } else {
+    parts.push('no gaps')
+  }
+
+  const earliest = ranked.shape.days.reduce<number | null>(
+    (soonest, day) => (soonest === null ? day.firstStart : Math.min(soonest, day.firstStart)),
+    null,
+  )
+  if (earliest !== null) parts.push(`starts ${formatMinuteOfDay(earliest as never)}`)
+
+  return parts.join(' · ')
+}
+
+/**
+ * The generated schedules, and a way through them.
+ *
+ * A count alone would be useless — "37 schedules" is not an answer — so the
+ * best one is drawn immediately and the rest are paged, in ranked order. The
+ * shape line under the controls is why this one came first, because a ranked
+ * list with no stated reason reads as arbitrary.
+ */
+function Schedules({
+  ranked,
+  index,
+  onIndex,
+  truncated,
+}: {
+  ranked: readonly RankedSchedule[]
+  index: number
+  onIndex: (next: number) => void
+  truncated: boolean
+}) {
+  const current = ranked[index]
+  if (current === undefined) return null
+
+  return (
+    <section className="schedules" aria-label="Generated schedules">
+      <div className="schedule-bar">
+        <div className="schedule-nav">
+          <button type="button" onClick={() => onIndex(index - 1)} disabled={index === 0}>
+            Previous
+          </button>
+          <span className="schedule-count">
+            Schedule {index + 1} of {ranked.length}
+            {truncated && '+'}
+          </span>
+          <button
+            type="button"
+            onClick={() => onIndex(index + 1)}
+            disabled={index >= ranked.length - 1}
+          >
+            Next
+          </button>
+        </div>
+        <p className="schedule-why">{describeShape(current)}</p>
+      </div>
+
+      <WeekGrid sources={sourcesFor(current)} />
+
+      <ul className="schedule-picks">
+        {current.schedule.units.map((unit) => (
+          <li key={unit.id}>
+            <strong>{courseLabel(unit.courseKey)}</strong>{' '}
+            {/* What to actually register for, which is not always what is drawn:
+                a parent lecture appears on the grid but is enrolled through its
+                child. Saying only "section 1100" would send a student to the
+                wrong row on their enrolment page. */}
+            <span className="schedule-enroll">
+              {unit.enroll.length === 0
+                ? 'no directly enrollable section'
+                : `enroll in ${unit.enroll.map((s) => s.number ?? '—').join(' + ')}`}
+            </span>
+            {unit.sections.length > unit.enroll.length && (
+              <span className="schedule-attached">
+                {' '}
+                (also attends{' '}
+                {unit.sections
+                  .filter((s) => !s.enrollable)
+                  .map((s) => `${vocabularyLabel(s.component)} ${s.number ?? '—'}`)
+                  .join(', ')}
+                )
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 export function App({ loaders = DEFAULT_LOADERS }: { loaders?: Loaders } = {}) {
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -177,10 +307,38 @@ export function App({ loaders = DEFAULT_LOADERS }: { loaders?: Loaders } = {}) {
     [loaders],
   )
 
-  const sectionsFor = (key: CourseKey): readonly Section[] | undefined => {
-    const bundle = bundles.get(splitCourseKey(key).subject)
-    return bundle?.sections.filter((section) => section.courseKey === key)
-  }
+  const sectionsFor = useCallback(
+    (key: CourseKey): readonly Section[] | undefined => {
+      const bundle = bundles.get(splitCourseKey(key).subject)
+      return bundle?.sections.filter((section) => section.courseKey === key)
+    },
+    [bundles],
+  )
+
+  // Nothing can be solved until every picked course's bundle has arrived;
+  // solving a subset would present a schedule that silently omits a course.
+  const options = useMemo(() => {
+    const ready = picked.map((course) => sectionsFor(course.key))
+    if (ready.some((sections) => sections === undefined)) return null
+    return picked.map((course, at) => ({
+      courseKey: course.key,
+      units: courseUnits(TERM, ready[at] ?? []),
+    }))
+  }, [picked, sectionsFor])
+
+  const solved = useMemo(
+    () => (options === null ? null : solveSchedules(options)),
+    [options],
+  )
+  const ranked = useMemo(
+    () => (solved === null ? [] : rankSchedules(solved.schedules)),
+    [solved],
+  )
+
+  const [index, setIndex] = useState(0)
+  // The ranking changes whenever the courses do, so a held index would point at
+  // an unrelated schedule — or past the end of a shorter list.
+  useEffect(() => setIndex(0), [ranked])
 
   if (error !== null) {
     return (
@@ -222,6 +380,47 @@ export function App({ loaders = DEFAULT_LOADERS }: { loaders?: Loaders } = {}) {
           selected={new Set(picked.map((c) => c.key))}
           onPick={pick}
         />
+      )}
+
+      {picked.length > 0 && solved === null && (
+        <p className="status">Loading sections…</p>
+      )}
+
+      {solved !== null && ranked.length > 0 && (
+        <Schedules
+          ranked={ranked}
+          index={Math.min(index, ranked.length - 1)}
+          onIndex={setIndex}
+          truncated={solved.truncated}
+        />
+      )}
+
+      {/* A bare "no schedule works" is the least useful thing to say, so the
+          two failures that can be named are named. */}
+      {solved !== null && ranked.length === 0 && solved.empty.length > 0 && (
+        <div className="status error">
+          <p>
+            {solved.empty.map(courseLabel).join(', ')} has no sections in this term, so nothing can
+            be built around it.
+          </p>
+        </div>
+      )}
+
+      {solved !== null && ranked.length === 0 && solved.empty.length === 0 && (
+        <div className="status error">
+          {solved.blockers.length > 0 ? (
+            <p>
+              No schedule works. {solved.blockers.map(([a, b]) => `${courseLabel(a)} and ${courseLabel(b)}`).join('; ')}{' '}
+              cannot be taken together — every section of one clashes with every section of the
+              other.
+            </p>
+          ) : (
+            <p>
+              No schedule works. No single pair is to blame; the courses only conflict once they
+              are combined, so try dropping any one of them.
+            </p>
+          )}
+        </div>
       )}
 
       {picked.length === 0 ? (
