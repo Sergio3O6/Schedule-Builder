@@ -151,15 +151,36 @@ describe('combSectId', () => {
 })
 
 describe('unitId', () => {
-  it('is stable for the same term and enrolment section', () => {
+  it('is stable for the same term and sections', () => {
     const term = termCode('4269')
-    expect(unitId(term, classNbr('17939'))).toBe(unitId(term, classNbr('17939')))
+    expect(unitId(term, [classNbr('17939')])).toBe(unitId(term, [classNbr('17939')]))
   })
 
   it('separates the same class number across terms', () => {
-    expect(unitId(termCode('4269'), classNbr('17939'))).not.toBe(
-      unitId(termCode('4259'), classNbr('17939')),
+    expect(unitId(termCode('4269'), [classNbr('17939')])).not.toBe(
+      unitId(termCode('4259'), [classNbr('17939')]),
     )
+  })
+
+  it('depends on the set of sections, not the order they arrive in', () => {
+    // A unit is assembled component-group by component-group, and two call
+    // paths can reach the same combination in different orders. If the id
+    // disagreed, React would re-mount a row that had not changed.
+    const term = termCode('4269')
+    const lecture = classNbr('14508')
+    const lab = classNbr('17939')
+    expect(unitId(term, [lecture, lab])).toBe(unitId(term, [lab, lecture]))
+  })
+
+  it('separates a lecture-plus-lab unit from the lab alone', () => {
+    const term = termCode('4269')
+    expect(unitId(term, [classNbr('14508'), classNbr('17939')])).not.toBe(
+      unitId(term, [classNbr('17939')]),
+    )
+  })
+
+  it('refuses a unit with no sections', () => {
+    expect(() => unitId(termCode('4269'), [])).toThrow(/at least one section/)
   })
 })
 

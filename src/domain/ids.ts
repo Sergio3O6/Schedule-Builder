@@ -159,10 +159,21 @@ export function sectionNumber(raw: string): SectionNumber | null {
 /**
  * Identity for a registerable unit.
  *
- * Keyed on the section a student actually enrolls in, so two courses that share
- * one physical class (cross-listed EECS 781 and MATH 781) produce the same id
- * and collapse into a single unit.
+ * Keyed on every class number in the combination, not just the enrolled one.
+ * A unit is a lecture AND a lab, and CHEM 130 pairs each of its 38 labs with
+ * each of 4 lectures — keying on the enrolled section alone would give all four
+ * of a lab's combinations one id and collapse them into a single choice.
+ *
+ * Sorted before joining so the id depends on the SET, not on the order the
+ * caller happened to assemble it in. Two code paths building the same unit must
+ * agree, or React re-mounts a row that did not change and a memo never hits.
+ *
+ * This does not collapse cross-listings, and must not: EECS 781 and MATH 781
+ * carry different class numbers under their own course codes, and each is a
+ * genuine, separately-enrollable choice. That they cannot both be held is a
+ * conflict rule, not an identity one — see `unitsConflict`.
  */
-export function unitId(term: TermCode, enrollClassNbr: ClassNbr): UnitId {
-  return `${term}:${enrollClassNbr}` as UnitId
+export function unitId(term: TermCode, classNbrs: readonly ClassNbr[]): UnitId {
+  if (classNbrs.length === 0) throw new Error('a unit needs at least one section')
+  return `${term}:${[...classNbrs].sort((a, b) => a - b).join('+')}` as UnitId
 }

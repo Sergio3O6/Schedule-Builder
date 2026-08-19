@@ -18,7 +18,7 @@
  * testing anything.
  */
 
-import { classNbr, courseKey, sectionNumber, termCode } from '../domain/ids.ts'
+import { classNbr, combSectId, courseKey, sectionNumber, termCode } from '../domain/ids.ts'
 import {
   parseCareer,
   parseComponent,
@@ -71,6 +71,12 @@ export interface SectionSpec {
   readonly scheduled?: readonly ScheduledMeeting[]
   readonly unscheduled?: readonly UnscheduledMeeting[]
   readonly credits?: readonly [min: string, max: string]
+  /** 'LEC', 'LAB', 'DIS'. Linkage partitions on this, so tests need to set it. */
+  readonly component?: string
+  /** False for a parent lecture enrolled through its child. */
+  readonly enrollable?: boolean
+  /** The cross-listing group, for tests about units that are one class. */
+  readonly combSectId?: number
 }
 
 export function makeSection(spec: SectionSpec): Section {
@@ -82,12 +88,12 @@ export function makeSection(spec: SectionSpec): Section {
     number: sectionNumber(spec.number ?? '00001'),
     title: spec.course,
     topic: null,
-    component: parseComponent('LEC'),
+    component: parseComponent(spec.component ?? 'LEC'),
     career: parseCareer('UGDL'),
     consent: parseConsent('None'),
     credits: parseCredits(min, max),
-    enrollable: true,
-    combSectId: null,
+    enrollable: spec.enrollable ?? true,
+    combSectId: spec.combSectId === undefined ? null : combSectId(String(spec.combSectId)),
     enrollment: parseEnrollment({
       cap: '30',
       enrolled: '10',
