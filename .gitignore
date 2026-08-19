@@ -17,6 +17,12 @@ coverage/
 data/raw/
 public/bundles/
 
+# Git Bash writes one of these into the working directory whenever bash.exe
+# dies abnormally. Pure debris — a Cygwin stack trace and a list of loaded
+# DLLs — but it lands at the repo root, so an untracked one is one `git add .`
+# away from being committed. It has been already.
+*.stackdump
+
 *.local
 .DS_Store
 .vscode/*

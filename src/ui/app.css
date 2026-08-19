@@ -208,3 +208,121 @@ code {
   padding: 2rem 0;
   border-top: 1px solid var(--rule);
 }
+
+/* --- week grid ---------------------------------------------------------- */
+
+.week {
+  margin: 0 0 2rem;
+}
+
+.week-grid {
+  display: flex;
+  align-items: stretch;
+}
+
+.week-gutter {
+  flex: 0 0 auto;
+}
+
+.week-day {
+  flex: 1 1 0;
+  min-width: 0;
+  border-left: 1px solid var(--rule);
+}
+
+.week-heading {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: center;
+  padding: 0 0 0.35rem;
+  height: 1.2rem;
+}
+
+.week-track {
+  position: relative;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Sits above the line it labels rather than centred on it, so the topmost
+   label is not clipped by the edge of the grid. */
+.week-mark {
+  position: absolute;
+  right: 0.4rem;
+  transform: translateY(-0.5em);
+  font-size: 0.7rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.week-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.week-block {
+  position: absolute;
+  overflow: hidden;
+  padding: 0.15rem 0.3rem;
+  border-radius: 3px;
+  border-left: 3px solid hsl(var(--hue) 55% 42%);
+  background: hsl(var(--hue) 65% 92%);
+  color: hsl(var(--hue) 55% 22%);
+  font-size: 0.72rem;
+  line-height: 1.25;
+  box-sizing: border-box;
+}
+
+.week-block-label {
+  display: block;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.week-block-time {
+  display: block;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.hue-0 { --hue: 212; }
+.hue-1 { --hue: 145; }
+.hue-2 { --hue: 22; }
+.hue-3 { --hue: 280; }
+.hue-4 { --hue: 340; }
+.hue-5 { --hue: 178; }
+.hue-6 { --hue: 45; }
+.hue-7 { --hue: 255; }
+
+@media (prefers-color-scheme: dark) {
+  .week-block {
+    background: hsl(var(--hue) 40% 22%);
+    color: hsl(var(--hue) 45% 88%);
+    border-left-color: hsl(var(--hue) 50% 60%);
+  }
+}
+
+.week-unplaced {
+  margin: 1rem 0 0;
+  font-size: 0.85rem;
+}
+
+.week-unplaced h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 0.35rem;
+}
+
+.week-unplaced ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+}

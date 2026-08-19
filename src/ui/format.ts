@@ -17,6 +17,16 @@ import type { DayMask, MinuteOfDay } from '../domain/time.ts'
 import type { Credits } from '../domain/section.ts'
 import type { Meeting, ScheduledMeeting } from '../domain/meeting.ts'
 
+/** One column of the week, in the order a student reads one. */
+export interface WeekDay {
+  /** KU's own token, as the export writes it and as formatDayMask prints it. */
+  readonly token: string
+  /** The bit this day occupies in a DayMask. */
+  readonly bit: number
+  /** A calendar column heading. Wider than the token, which is too terse alone. */
+  readonly heading: string
+}
+
 /**
  * KU's order, not the bitmask's.
  *
@@ -24,21 +34,24 @@ import type { Meeting, ScheduledMeeting } from '../domain/meeting.ts'
  * starts, but the export writes 'MTuWThF' and a student reads a week as
  * starting on Monday. Printing bit order would produce 'SuMTuWThFSa' — correct
  * and unrecognisable.
+ *
+ * Exported because the calendar lays its columns out in exactly this order, and
+ * two tables of the same seven days is one more than can be kept in step.
  */
-const DAY_ORDER: readonly (readonly [string, number])[] = [
-  ['M', 1 << 1],
-  ['Tu', 1 << 2],
-  ['W', 1 << 3],
-  ['Th', 1 << 4],
-  ['F', 1 << 5],
-  ['Sa', 1 << 6],
-  ['Su', 1 << 0],
+export const DAY_ORDER: readonly WeekDay[] = [
+  { token: 'M', bit: 1 << 1, heading: 'Mon' },
+  { token: 'Tu', bit: 1 << 2, heading: 'Tue' },
+  { token: 'W', bit: 1 << 3, heading: 'Wed' },
+  { token: 'Th', bit: 1 << 4, heading: 'Thu' },
+  { token: 'F', bit: 1 << 5, heading: 'Fri' },
+  { token: 'Sa', bit: 1 << 6, heading: 'Sat' },
+  { token: 'Su', bit: 1 << 0, heading: 'Sun' },
 ]
 
 /** 'MWF'. Empty for a mask with no days, which the caller must not print bare. */
 export function formatDayMask(days: DayMask): string {
-  return DAY_ORDER.filter(([, bit]) => (days & bit) !== 0)
-    .map(([token]) => token)
+  return DAY_ORDER.filter(({ bit }) => (days & bit) !== 0)
+    .map(({ token }) => token)
     .join('')
 }
 
