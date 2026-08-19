@@ -96,6 +96,25 @@ const DAY_BITS: Record<string, number> = {
 export const NO_DAYS = 0 as DayMask
 
 /**
+ * The seven day bits, Monday first.
+ *
+ * Exported because anything reasoning about a week a day at a time — laying it
+ * out, or scoring how many days it occupies — needs to iterate them, and the
+ * alternative is each caller writing `1 << 1` again. The order is the teaching
+ * week rather than the bit order, since Sunday is bit 0 and nobody thinks of a
+ * week that way.
+ */
+export const WEEK_DAY_BITS: readonly DayMask[] = [
+  DAY_BITS['M'] as DayMask,
+  DAY_BITS['Tu'] as DayMask,
+  DAY_BITS['W'] as DayMask,
+  DAY_BITS['Th'] as DayMask,
+  DAY_BITS['F'] as DayMask,
+  DAY_BITS['Sa'] as DayMask,
+  DAY_BITS['Su'] as DayMask,
+]
+
+/**
  * Parses a meeting-days string into a bitmask.
  *
  * Throws on leftover characters rather than ignoring them: a token this does not
